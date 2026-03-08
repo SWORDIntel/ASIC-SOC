@@ -215,7 +215,12 @@ class TacticalASICDashboard:
         else:
             backend_ifaces = self.interfaces
 
-        cmd = ["sudo", "stdbuf", "-oL", "./asic_main"] + backend_ifaces + node_args
+        # Check if already root to avoid redundant sudo
+        cmd_prefix = ["stdbuf", "-oL"]
+        if os.geteuid() != 0:
+            cmd_prefix = ["sudo", "-E", "stdbuf", "-oL"]
+            
+        cmd = cmd_prefix + ["./asic_main"] + backend_ifaces + node_args
         # Use preexec_fn to create a process group so we can signal through sudo
         self.backend_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=dev_dir, preexec_fn=os.setpgrp)
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@~])')
@@ -295,6 +300,31 @@ class TacticalASICDashboard:
                 self.alerts.append([ts, "[bold red]L3+ ME[/bold red]", "Unauthorized HECI"])
             elif "[ASIC L3 ALERT]" in line: self.alerts.append([ts, "[yellow]L3[/yellow]", "Cache Anomaly"])
 
+    def signal_backend(self, sig):
+        if not self.backend_process: return
+        ts = time.strftime("%H:%M:%S")
+        sig_name = "HAMMER" if sig == signal.SIGUSR1 else "VAULT"
+        self.alerts.append([ts, "[bold cyan]SYSTEM[/bold cyan]", f"Dispatching {sig_name} Signal..."])
+        
+        try:
+            # 1. Try signaling the process group leader
+            os.killpg(os.getpgid(self.backend_process.pid), sig)
+            
+            # 2. Find actual asic_main child and signal it directly
+            # This is critical when running under sudo
+            parent = psutil.Process(self.backend_process.pid)
+            for child in parent.children(recursive=True):
+                if "asic_main" in child.name():
+                    # If we are root, we can signal directly. 
+                    # If not, we use sudo kill as a fallback.
+                    if os.geteuid() == 0:
+                        child.send_signal(sig)
+                    else:
+                        sig_str = "USR1" if sig == signal.SIGUSR1 else "USR2"
+                        subprocess.run(["sudo", "kill", f"-{sig_str}", str(child.pid)], capture_output=True)
+        except Exception as e:
+            self.alerts.append([ts, "[bold red]ERROR[/bold red]", f"Signal Fail: {str(e)[:20]}"])
+
     def handle_input(self):
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
@@ -305,14 +335,10 @@ class TacticalASICDashboard:
                     key = sys.stdin.read(1)
                     if not self.backend_process: continue
                     
-                    # Use sudo kill to ensure signals reach the root backend process
                     if key == 'h':
-                        subprocess.run(["sudo", "kill", "-USR1", str(self.backend_process.pid)], capture_output=True)
-                        # Also signal the process group just in case
-                        os.killpg(os.getpgid(self.backend_process.pid), signal.SIGUSR1)
+                        self.signal_backend(signal.SIGUSR1)
                     elif key == 'v':
-                        subprocess.run(["sudo", "kill", "-USR2", str(self.backend_process.pid)], capture_output=True)
-                        os.killpg(os.getpgid(self.backend_process.pid), signal.SIGUSR2)
+                        self.signal_backend(signal.SIGUSR2)
 
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
