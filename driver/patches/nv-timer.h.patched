@@ -1,0 +1,33 @@
+#ifndef __NV_TIMER_H__
+#define __NV_TIMER_H__
+
+#include <linux/timer.h>
+#include <linux/kernel.h>
+#include <linux/version.h>
+#include "conftest.h"
+
+struct nv_timer
+{
+    struct timer_list kernel_timer;
+    void (*nv_timer_callback)(struct nv_timer *nv_timer);
+};
+
+static inline void nv_timer_callback_typed_data(struct timer_list *timer)
+{
+    struct nv_timer *nv_timer = container_of(timer, struct nv_timer, kernel_timer);
+    nv_timer->nv_timer_callback(nv_timer);
+}
+
+static inline void nv_timer_setup(struct nv_timer *nv_timer, void (*callback)(struct nv_timer *nv_timer))
+{
+    nv_timer->nv_timer_callback = callback;
+    #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
+        timer_setup(&nv_timer->kernel_timer, nv_timer_callback_typed_data, 0);
+    #else
+        init_timer(&nv_timer->kernel_timer);
+        nv_timer->kernel_timer.function = (void (*)(unsigned long))nv_timer_callback_typed_data;
+        nv_timer->kernel_timer.data = (unsigned long)nv_timer;
+    #endif
+}
+
+#endif

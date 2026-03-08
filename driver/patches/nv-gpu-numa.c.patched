@@ -1,0 +1,15 @@
+#include "nv-linux.h"
+#include "nv-gpu-numa.h"
+#include "nvmisc.h"
+
+/* Disable internal redefinitions for modern kernels */
+#define NV_ITERATE_DIR_PRESENT
+#define NV_STRNSTR_PRESENT
+#define NV_KERNEL_WRITE_PRESENT
+#define NV_KSTRTOULL_PRESENT
+
+#include <linux/fs.h>
+#include <linux/string.h>
+#include <linux/uaccess.h>
+
+#include "nv-gpu-numa.c.orig"

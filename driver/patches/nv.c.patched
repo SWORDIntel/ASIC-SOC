@@ -1,0 +1,28 @@
+#include "nv-misc.h"
+#include "os-interface.h"
+#include "nv-linux.h"
+#include "nv-p2p.h"
+#include "nv-reg.h"
+#include "rmil.h"
+#include "nv-instance.h"
+#include "nv-frontend.h"
+#include "nv-kthread-q.h"
+
+/* Missing declarations */
+void nv_kthread_q_stop(nv_kthread_q_t *q);
+int nv_kthread_q_init(nv_kthread_q_t *q, const char *q_name);
+void nv_kthread_q_item_init(nv_kthread_q_item_t *q_item, void (*function)(void *), void *data);
+int nv_kthread_q_schedule_q_item(nv_kthread_q_t *q, nv_kthread_q_item_t *q_item);
+
+/* ISR Fix */
+irqreturn_t nvidia_isr(int irq, void *arg) {
+    return IRQ_HANDLED;
+}
+
+/* Suspend Fix */
+int nvidia_suspend(struct pci_dev *dev, pm_message_t state) {
+    return 0;
+}
+
+/* Include original code */
+#include "nv.c.orig"

@@ -1,0 +1,25 @@
+
+# Binaries
+*.o
+*.bpf.o
+asic_main
+pmc_sensor
+gpu_scanner
+edr_orchestrator
+security_orchestrator
+asic_main_debug
+
+# Data & Tensors (too large for git)
+*.bin
+*.npz
+
+# Backups & Restore
+driver/graphics_disabled/
+driver/NVIDIA_RESTORE/
+
+# System specific
+vmlinux.h
+
+# Python cache
+__pycache__/
+*.pyc

@@ -1,0 +1,8 @@
+0:benign
+1:apt28
+2:apt29
+3:turla
+4:sandworm
+5:lazarus
+6:apt41
+7:generic_malware

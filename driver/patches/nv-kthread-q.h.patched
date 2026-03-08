@@ -1,0 +1,24 @@
+#ifndef __NV_KTHREAD_QUEUE_H__
+#define __NV_KTHREAD_QUEUE_H__
+
+#include <linux/types.h>
+#include <linux/list.h>
+#include <linux/sched.h>
+#include <linux/semaphore.h>
+#include "conftest.h"
+
+typedef struct nv_kthread_q_item_s {
+    struct list_head node;
+    void (*function)(void *);
+    void *data;
+    struct completion completion;
+} nv_kthread_q_item_t;
+
+typedef struct nv_kthread_q_s {
+    struct task_struct *q_kthread;
+    struct list_head q_list;
+    spinlock_t q_lock;
+    wait_queue_head_t q_waitqueue;
+} nv_kthread_q_t;
+
+#endif
