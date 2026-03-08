@@ -60,7 +60,7 @@ The **ASI Command Center** provides a real-time visualization of the ASIC's inte
 - **Hardware**: NVIDIA GTX 560 Ti (Fermi) or better.
 - **Kernel**: Linux 6.12+ (AMD64).
 - **Driver**: NVIDIA Legacy 390.157 (Surgically stripped to ASIC mode).
-- **Sensors**: `libbpf`, `XDP`, `perf_event`, `iw`, and `/dev/mei0`.
+- **Sensors**: `libbpf`, `XDP`, `perf_event`, `iw`, `libpci-dev`, and `/dev/mei0`.
 - **Utilities**: `nvidia-smi` (for live thermal polling).
 
 ## 8. Quick Start
