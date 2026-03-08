@@ -93,6 +93,8 @@ class TacticalASICDashboard:
         table.add_row("L2 CODE", "[cyan]OFFLOADING[/cyan]")
         table.add_row("L3 HW", "[green]NOMINAL[/green]")
         table.add_row("L4 RF", "[red]ALERT[/red]" if self.jamming_active else "[green]PASSIVE[/green]")
+        table.add_row("L5 EVOLVE", "[magenta]CONTINUOUS[/magenta]" if self.stats.get("Tensors_Optimized", 0) > 0 else "[dim]STANDBY[/dim]")
+        table.add_row("L6 CRYPTO", "[cyan]ANALYZING[/cyan]")
         return Panel(table, title="[bold]DEFENSE[/bold]", border_style="green")
 
     def get_traffic_panel(self):
@@ -119,9 +121,11 @@ class TacticalASICDashboard:
             line = process.stdout.readline()
             if not line: break
             ts = time.strftime("%H:%M:%S")
-            if "match" not in line.lower() and "online" not in line.lower() and "attached" not in line.lower():
-                self.packet_stream.append(Text(f"INBOUND >> {line.strip()[:35]}", style="dim green"))
-            if "[ASIC L4 EW ALERT]" in line:
+            # Stylize only explicit [TRAFFIC] lines for the stream
+            if "[TRAFFIC]" in line:
+                clean_line = line.replace("[TRAFFIC]", "").strip()[:40]
+                self.packet_stream.append(Text(f"> {clean_line}", style="dim green"))
+            elif "[ASIC L4 EW ALERT]" in line:
                 self.alerts.append([ts, "[cyan]L4[/cyan]", "[bold blink red]JAMMING DETECTED[/bold blink red]"])
                 self.jamming_active = True
                 threading.Thread(target=self.trigger_bios_beep, daemon=True).start()
