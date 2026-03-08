@@ -84,3 +84,28 @@ __kernel void rf_spectrum_analyzer(__global const float *rf_signals_current, __g
     for(int i=0; i<num_channels; i++) { if(rf_signals_baseline[i] > -90.0f && rf_signals_current[i] <= -100.0f) deafened++; }
     *ew_anomaly_score = (deafened >= (num_channels / 2)) ? 1.0f : 0.0f;
 }
+
+// 6. Code Intelligence / Semantic Search Core
+// Performs fast cosine-similarity on code snippet vectors for Windsurf offloading
+__kernel void code_intelligence_core(
+    __global const float *codebase_vectors, // [num_snippets * 160]
+    __global const float *search_vector,   // [160]
+    __global float *similarity_scores,     // [num_snippets]
+    const int num_snippets)
+{
+    int gid = get_global_id(0);
+    if (gid >= num_snippets) return;
+
+    float dot = 0.0f, n_code = 0.0f, n_search = 0.0f;
+    for (int i = 0; i < 160; i++) {
+        float c = codebase_vectors[gid * 160 + i];
+        float s = search_vector[i];
+        dot += c * s; n_code += c * c; n_search += s * s;
+    }
+    
+    if (n_code > 0.0f && n_search > 0.0f) {
+        similarity_scores[gid] = dot / (sqrt(n_code) * sqrt(n_search));
+    } else {
+        similarity_scores[gid] = 0.0f;
+    }
+}

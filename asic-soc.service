@@ -1,0 +1,14 @@
+
+[Unit]
+Description=QIHSE Monolithic Security ASIC
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/john/Documents/ASIC-SOC/scripts/asic_dashboard.py enp4s0
+WorkingDirectory=/home/john/Documents/ASIC-SOC/scripts
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
