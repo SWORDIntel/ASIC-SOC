@@ -71,4 +71,4 @@ Licensed under the **Hostile Architecture Public License (HAPL) v1.0**.
 Commercial exploitation, AI scraping, and state-actor usage are strictly forbidden without express authorization. See `LICENSE` for the "SaaS Poison Pill" and viral copyleft clauses.
 
 ---
-**Developed by SWORDIntel / DSMIL System**
+**Developed by SWORDIntel / DSMIL System on a whim,the implications for adapting old computer parts especially given currrent pricesx are endless*
