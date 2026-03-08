@@ -5,7 +5,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /home/john/Documents/ASIC-SOC/scripts/asic_dashboard.py enp4s0
+ExecStart=/usr/bin/python3 /home/john/Documents/ASIC-SOC/scripts/asic_dashboard.py enp4s0 wlp2s0
 WorkingDirectory=/home/john/Documents/ASIC-SOC/scripts
 Restart=always
 User=root

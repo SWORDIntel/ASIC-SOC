@@ -1,3 +1,4 @@
+#include <math.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -144,8 +145,21 @@ int handle_event(void *cb_ctx, void *data, size_t data_sz) {
                    (unsigned char)e->payload[4], (unsigned char)e->payload[5], (unsigned char)e->payload[6], (unsigned char)e->payload[7]);
         } else {
             printf("[TRAFFIC] L2_EXEC | %s\n", e->comm);
+            fflush(stdout); // Ensure immediate delivery
+            
             float q[VECTOR_DIMS] = {0.0f};
-            for(int i=0; i<16 && i<VECTOR_DIMS; i++) q[i] = (float)(e->payload[i]) / 255.0f;
+            for(int i=0; i<MAX_PAYLOAD && i < 160; i++) {
+                unsigned char b = (unsigned char)e->payload[i];
+                if(b == 0) break;
+                q[b % VECTOR_DIMS] += 1.0f;
+            }
+            float q_norm = 0.0f;
+            for(int i=0; i<VECTOR_DIMS; i++) q_norm += q[i]*q[i];
+            if(q_norm > 0) {
+                q_norm = sqrt(q_norm);
+                for(int i=0; i<VECTOR_DIMS; i++) q[i] /= q_norm;
+            }
+            
             cl_mem dq = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(q), q, NULL);
             cl_mem ds = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, sizeof(float)*DB_SIZE, NULL, NULL);
             int ndb = DB_SIZE;
@@ -157,9 +171,12 @@ int handle_event(void *cb_ctx, void *data, size_t data_sz) {
             float sc[DB_SIZE]; clEnqueueReadBuffer(cmd_q, ds, CL_TRUE, 0, sizeof(sc), sc, 0, NULL, NULL);
             float ms = 0.0f; int bt = 0;
             for(int i=0; i<DB_SIZE; i++) { if(sc[i] > ms) { ms = sc[i]; bt = i; } }
-            if(ms > 0.92f) printf("\033[1;35m[ASIC VECTOR ALERT] APT %d Behavior Detected! Score: %.2f\033[0m\n", bt/100, ms);
-            else if (ms > 0.60f && ms < 0.92f) {
-                float lr = 0.05f;
+            if(ms > 0.10f) { // Aggressive threshold for diagnostics
+                printf("\033[1;35m[ASIC VECTOR ALERT] Pattern Score: %.2f (Best Class: %d)\033[0m\n", ms, bt/100);
+            }
+            
+            if (ms > 0.05f && ms < 0.95f) {
+                float lr = 0.1f; // Higher learning rate for testing
                 clSetKernelArg(evolution_k, 0, sizeof(cl_mem), &db_vectors_mem);
                 clSetKernelArg(evolution_k, 1, sizeof(cl_mem), &dq);
                 clSetKernelArg(evolution_k, 2, sizeof(int), &bt);

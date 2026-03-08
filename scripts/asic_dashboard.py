@@ -116,11 +116,17 @@ class TacticalASICDashboard:
     def monitor_asic(self):
         dev_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dev"))
         cmd = ["sudo", "stdbuf", "-oL", "./asic_main"] + self.interfaces
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=dev_dir)
+        # Open in binary mode to avoid UnicodeDecodeError
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=dev_dir)
+
         while not self.stop_event.is_set():
-            line = process.stdout.readline()
-            if not line: break
+            raw_line = process.stdout.readline()
+            if not raw_line: break
+
+            # Safe decode
+            line = raw_line.decode('utf-8', errors='ignore')
             ts = time.strftime("%H:%M:%S")
+
             # Stylize only explicit [TRAFFIC] lines for the stream
             if "[TRAFFIC]" in line:
                 clean_line = line.replace("[TRAFFIC]", "").strip()[:40]
@@ -132,7 +138,7 @@ class TacticalASICDashboard:
             elif "[ASIC PRIV ALERT]" in line:
                 self.alerts.append([ts, "[red]L2[/red]", "PrivEsc Detected"])
             elif "[ASIC VECTOR ALERT]" in line:
-                self.alerts.append([ts, "[magenta]L2[/magenta]", "APT Pattern Match"])
+                self.alerts.append([ts, "[bold magenta]L2 (EDR)[/bold magenta]", "[bold reverse magenta] APT BEHAVIORAL MATCH [/bold reverse magenta]"])
             elif "[ASIC L3 ALERT]" in line:
                 self.alerts.append([ts, "[yellow]L3[/yellow]", "Cache Anomaly"])
 
