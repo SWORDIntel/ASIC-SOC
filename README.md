@@ -28,6 +28,7 @@ The system monitors the entire silicon-to-signal spectrum:
 - **Side-Channel Cryptanalysis (L6)**: High-confidence Pearson Correlation core performs long-term Differential Power/Timing Analysis (DPA) against Intel ME operations.
 - **Tactical Dashboard**: A military-grade Terminal UI (Kitty-native) with real-time telemetry, host vitals, and auto-focus emergency response.
 - **Emergency Lockdown**: Integrated BIOS beep alerts and window focus hijacking if C-Band spectrum saturation (Jamming) is detected.
+- **Swarm Triangulation (L4/L5)**: Multiple ASICs cooperate via UDP Multicast (239.0.0.1) to share RF signal strengths. The system automatically triangulates the X/Y coordinates of a jamming source when 2 or more nodes report interference.
 
 ## 4. Advanced Operational Modes
 
@@ -65,8 +66,10 @@ The **ASI Command Center** provides a real-time visualization of the ASIC's inte
 ## 8. Quick Start
 ```bash
 # Launch the ASI Command Center (Multi-Interface)
-sudo python3 scripts/asic_dashboard.py enp4s0 wlp2s0
+sudo python3 scripts/asic_dashboard.py enp4s0 wlp2s0 --node 1
 ```
+
+*Note: Use different --node IDs (0-9) on different machines to enable Swarm Triangulation.*
 
 ## 9. License
 Licensed under the **Hostile Architecture Public License (HAPL) v1.0**. 

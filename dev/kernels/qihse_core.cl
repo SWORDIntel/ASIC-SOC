@@ -124,3 +124,19 @@ __kernel void code_intelligence_core(__global const float *cv, __global const fl
     float d=0, nc=0, ns=0; for (int i=0; i<160; i++) { float c=cv[gid*160+i], v=sv[i]; d+=c*v; nc+=c*c; ns+=v*v; }
     s[gid] = (nc>0 && ns>0) ? d/(sqrt(nc)*sqrt(ns)) : 0;
 }
+
+// 6. Blackbox Core (Circular VRAM Logging)
+__kernel void blackbox_append(__global char *buffer, __global const char *data, __global int *head, const int buffer_size, const int data_size) {
+    int gid = get_global_id(0);
+    if (gid >= data_size) return;
+    int h = *head;
+    buffer[(h + gid) % buffer_size] = data[gid];
+    if (gid == 0) *head = (h + data_size) % buffer_size;
+}
+
+// 7. GPU Vault Crypt (XOR Stream Cipher)
+__kernel void gpu_vault_crypt(__global char *data, __global const char *key, const int data_size, const int key_size) {
+    int gid = get_global_id(0);
+    if (gid >= data_size) return;
+    data[gid] ^= key[gid % key_size];
+}

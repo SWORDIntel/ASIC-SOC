@@ -6,3 +6,5 @@
 5:lazarus
 6:apt41
 7:generic_malware
+8:vault7_marble
+9:firmware_implant

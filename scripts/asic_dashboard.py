@@ -28,7 +28,8 @@ class TacticalASICDashboard:
         self.stats = {
             "L1_Net": 0, "L2_EDR": 0, "L2_PRIV": 0, 
             "L3_HW": 0, "L4_RF": 0, "ASI_Load": 15,
-            "Tensors_Optimized": 0, "Actual_Tensors": 0
+            "Tensors_Optimized": 0, "Actual_Tensors": 0,
+            "Triangulation": None
         }
         self.cpu_history = []
         self.tensor_heatmap = [0] * 128 # 16x8 grid representing Threat DB
@@ -147,6 +148,10 @@ class TacticalASICDashboard:
         table.add_row("L2 PRIV", "[green]ENFORCED[/green]")
         table.add_row("L3 HW", "[green]NOMINAL[/green]")
         table.add_row("L4 RF", "[red]ALERT[/red]" if self.jamming_active else "[green]PASSIVE[/green]")
+        if self.stats.get("Triangulation"):
+            x, y, conf = self.stats["Triangulation"]
+            table.add_row(" └─ [yellow]TRIANG[/yellow]", f"[bold yellow]X:{x} Y:{y}[/bold yellow]")
+            table.add_row(" └─ [yellow]CONF[/yellow]", f"[yellow]{conf} NODES[/yellow]")
         table.add_row("L5 SWARM", f"[cyan]{self.swarm_nodes} NODES ({self.swarm_syncs} SYNCS)[/cyan]")
         table.add_row("L6 CRYPTO", "[bold red]HAMMERING[/bold red]" if self.hammer_mode else "[cyan]ANALYZING[/cyan]")
         table.add_row("VAULT", "[bold red]LOCKED[/bold red]" if self.vault_locked else "[green]UNLOCKED[/green]")
@@ -196,7 +201,18 @@ class TacticalASICDashboard:
 
     def monitor_asic(self):
         dev_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dev"))
-        cmd = ["sudo", "stdbuf", "-oL", "./asic_main"] + self.interfaces
+        
+        # Check for --node in sys.argv
+        node_args = []
+        if "--node" in sys.argv:
+            idx = sys.argv.index("--node")
+            node_args = ["--node", sys.argv[idx+1]]
+            # Filter it out from interfaces for the backend
+            backend_ifaces = [x for x in self.interfaces if x != "--node" and x != sys.argv[idx+1]]
+        else:
+            backend_ifaces = self.interfaces
+
+        cmd = ["sudo", "stdbuf", "-oL", "./asic_main"] + backend_ifaces + node_args
         # Use preexec_fn to create a process group so we can signal through sudo
         self.backend_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=dev_dir, preexec_fn=os.setpgrp)
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@~])')
@@ -213,6 +229,11 @@ class TacticalASICDashboard:
                 if match: self.stats["Actual_Tensors"] = int(match.group(1))
             elif "[VAULT] LOCKED" in line: self.vault_locked = True
             elif "[VAULT] UNLOCKED" in line: self.vault_locked = False
+            elif "[SWARM] L4 TRIANGULATION" in line:
+                match = re.search(r'Source detected at X:(.*) Y:(.*) \(Confidence: (\d+) nodes\)', line)
+                if match:
+                    self.stats["Triangulation"] = (match.group(1), match.group(2), match.group(3))
+                    self.alerts.append([ts, "[bold yellow]SWARM[/bold yellow]", f"EW Triangulation: {match.group(3)} Nodes"])
             elif "[SWARM]" in line:
                 self.swarm_syncs += 1
                 self.alerts.append([ts, "[cyan]L5[/cyan]", "[bold cyan]Swarm Sync: Peer Vector[/bold cyan]"])

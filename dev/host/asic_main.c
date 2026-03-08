@@ -54,6 +54,7 @@ static float total_traces_processed = 0.0f;
 static int stop = 0;
 static int hammer_mode = 0;
 static int blackbox_offset = 0;
+static int node_id = 0;
 
 void sig_handler(int sig) { 
     if (sig == SIGINT) stop = 1; 
@@ -70,6 +71,13 @@ void sig_handler(int sig) {
     }
 }
 
+// Node positioning for triangulation (Static for simulation)
+// In a real deployment, these would come from GPS/Config
+float node_coords[10][2] = {
+    {0.0, 0.0}, {100.0, 0.0}, {0.0, 100.0}, {100.0, 100.0},
+    {50.0, 50.0}, {20.0, 80.0}, {80.0, 20.0}, {10.0, 10.0}
+};
+
 void *swarm_listener(void *arg) {
     int sd = socket(AF_INET, SOCK_DGRAM, 0);
     int reuse = 1;
@@ -85,11 +93,76 @@ void *swarm_listener(void *arg) {
     mreq.imr_interface.s_addr = htonl(INADDR_ANY);
     setsockopt(sd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
     char buf[1024];
+
+    // Tracking for triangulation
+    float peer_strengths[10] = {0};
+    time_t last_alert[10] = {0};
+
     while (!stop) {
-        int n = recv(sd, buf, sizeof(buf), 0);
-        if (n > 0) { printf("[SWARM] Received Vector Drift from Peer\n"); fflush(stdout); }
+        int n = recv(sd, buf, sizeof(buf) - 1, 0);
+        if (n > 0) {
+            buf[n] = '\0';
+            if (strncmp(buf, "JAMMING:", 8) == 0) {
+                int p_id; float strength;
+                sscanf(buf + 8, "%d:%f", &p_id, &strength);
+                if (p_id >= 0 && p_id < 10 && p_id != node_id) {
+                    peer_strengths[p_id] = strength;
+                    last_alert[p_id] = time(NULL);
+                    
+                    // Simple weighted triangulation if we have > 2 nodes
+                    int active_nodes = 0;
+                    float tx = 0, ty = 0, tw = 0;
+                    for (int i=0; i<10; i++) {
+                        if (time(NULL) - last_alert[i] < 5) { // within 5 seconds
+                            float weight = pow(10, (peer_strengths[i] + 100)/20.0); // simple inverse log
+                            tx += node_coords[i][0] * weight;
+                            ty += node_coords[i][1] * weight;
+                            tw += weight;
+                            active_nodes++;
+                        }
+                    }
+                    if (active_nodes >= 2) {
+                        printf("[SWARM] L4 TRIANGULATION: Source detected at X:%.1f Y:%.1f (Confidence: %d nodes)\n", tx/tw, ty/tw, active_nodes);
+                        fflush(stdout);
+                    }
+                }
+            } else {
+                printf("[SWARM] Received Vector Drift from Peer\n"); 
+                fflush(stdout); 
+            }
+        }
     }
     close(sd);
+    return NULL;
+}
+
+void *l4_rf_thread(void *arg) {
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "python3 ../scripts/../dev/sensors/rf_sensor.py %s", (char*)arg);
+    FILE *pipe = popen(cmd, "r");
+    if(!pipe) return NULL;
+    char line[128];
+    while(!stop && fgets(line, sizeof(line), pipe)) {
+        if(strncmp(line, "RF_DATA:", 8) == 0) {
+            float signals[10];
+            char *p = line + 8;
+            float max_sig = -100.0f;
+            for(int i=0; i<10; i++) {
+                signals[i] = atof(p);
+                if (signals[i] > max_sig) max_sig = signals[i];
+                p = strchr(p, ',');
+                if (p) p++; else break;
+            }
+            if (max_sig > -45.0f) { // Jamming threshold
+                printf("\033[1;31m[ASIC L4 EW ALERT] JAMMING DETECTED (Max: %.1f dBm)\033[0m\n", max_sig);
+                fflush(stdout);
+                char msg[64];
+                snprintf(msg, sizeof(msg), "JAMMING:%d:%.1f", node_id, max_sig);
+                sendto(swarm_sd, msg, strlen(msg), 0, (struct sockaddr *)&swarm_addr, sizeof(swarm_addr));
+            }
+        }
+    }
+    pclose(pipe);
     return NULL;
 }
 
@@ -350,16 +423,26 @@ int handle_event(void *cb_ctx, void *data, size_t data_sz) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) { printf("Usage: %s <ifname1> [ifname2] ...\n", argv[0]); return 1; }
+    if (argc < 2) { printf("Usage: %s <ifname1> [--node <id>]\n", argv[0]); return 1; }
+    
+    char *iface = argv[1];
+    for (int i=1; i<argc; i++) {
+        if (strcmp(argv[i], "--node") == 0 && i+1 < argc) {
+            node_id = atoi(argv[i+1]);
+        }
+    }
+
     signal(SIGINT, sig_handler);
     signal(SIGUSR1, sig_handler);
     signal(SIGUSR2, sig_handler);
     init_asic();
-    pthread_t comp_t, l3_t, mea_t, swarm_t;
+    pthread_t comp_t, l3_t, mea_t, swarm_t, l4_t;
     pthread_create(&comp_t, NULL, perform_compliance_check, NULL);
     pthread_create(&l3_t, NULL, l3_hardware_thread, NULL);
     pthread_create(&mea_t, NULL, me_activator_thread, NULL);
     pthread_create(&swarm_t, NULL, swarm_listener, NULL);
+    pthread_create(&l4_t, NULL, l4_rf_thread, (void*)iface);
+
     struct bpf_object *obj = bpf_object__open_file("asic_sensor.bpf.o", NULL);
     if (!obj || bpf_object__load(obj)) { printf("BPF Load Fail\n"); return 1; }
     bpf_program__attach(bpf_object__find_program_by_name(obj, "trace_execve"));
