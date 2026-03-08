@@ -13,6 +13,7 @@
 #include <linux/if_link.h>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
@@ -360,6 +361,10 @@ void *l3_hardware_thread(void *arg) {
 
 
 void *me_activator_thread(void *arg) {
+    // Intel ME Client GUIDs
+    unsigned char guid_amt[16] = {0x65, 0x39, 0x23, 0xAF, 0xCA, 0xFB, 0x81, 0x41, 0x91, 0xC3, 0x2B, 0x24, 0xED, 0x7A, 0x6A, 0x47};
+    unsigned char guid_icc[16] = {0x65, 0xF3, 0x0D, 0xD6, 0x0D, 0xD0, 0x53, 0x44, 0x97, 0x91, 0x05, 0xD4, 0xAF, 0x83, 0x34, 0x61};
+    
     unsigned char payloads[4][4] = {
         {0x01, 0x00, 0x00, 0x00}, // Standard Ping
         {0x02, 0x05, 0x01, 0x00}, // Get Version
@@ -372,15 +377,32 @@ void *me_activator_thread(void *arg) {
         int fd = open("/dev/mei0", O_RDWR);
         if (fd >= 0) {
             if (hammer_mode) {
-                // Vary payload to create diverse power signatures
+                // 1. Multi-Client Context Switching (Triggers ME Microkernel overhead)
+                // Connect to AMT HI Client
+                ioctl(fd, 0xc0104801, guid_amt); // IOCTL_MEI_CONNECT_CLIENT
                 write(fd, payloads[p_idx], 4);
+                
+                // Switch to ICC Client
+                ioctl(fd, 0xc0104801, guid_icc); 
+                write(fd, payloads[(p_idx + 1) % 4], 4);
+
+                // 2. PCI Config Space Hammering (Triggers bus-level leakage)
+                // We attempt to read the ME PCI Device ID (usually 00:16.0)
+                // In a real system, we'd use libpci, but here we simulate bus pressure
+                int pci_fd = open("/sys/bus/pci/devices/0000:00:16.0/config", O_RDONLY);
+                if (pci_fd >= 0) {
+                    unsigned int val;
+                    for(int i=0; i<10; i++) read(pci_fd, &val, 4);
+                    close(pci_fd);
+                }
+
                 p_idx = (p_idx + 1) % 4;
             } else {
                 write(fd, payloads[0], 4);
             }
             close(fd);
         }
-        // Hammer Mode runs at 10x frequency (50ms vs 500ms)
+        // Hammer Mode: 20Hz Multi-Client Burst vs 2Hz Scalar
         usleep(hammer_mode ? 50000 : 500000); 
     }
     return NULL;
