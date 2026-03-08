@@ -452,16 +452,21 @@ int handle_event(void *cb_ctx, void *data, size_t data_sz) {
     } else if (e->type == EVENT_EXEC) {
         printf("[TRAFFIC] L2_EDR  | %s -> %s\n", e->comm, e->payload);
         
-        // Dispatch to PrivEnforcer Kernel (Pre-allocated)
+        // Dispatch to PrivEnforcer Kernel (UIV Enhanced)
         int alert = 0;
         clEnqueueWriteBuffer(cmd_q, dev_event_alert_priv, CL_TRUE, 0, sizeof(int), &alert, 0, NULL, NULL);
         clSetKernelArg(priv_k, 0, sizeof(int), &e->uid);
-        int zero = 0;
-        clSetKernelArg(priv_k, 1, sizeof(int), &zero); 
-        clSetKernelArg(priv_k, 2, sizeof(cl_mem), &dev_event_alert_priv);
+        clSetKernelArg(priv_k, 1, sizeof(int), &e->loginuid); 
+        clSetKernelArg(priv_k, 2, sizeof(int), &e->has_tty);
+        clSetKernelArg(priv_k, 3, sizeof(cl_mem), &dev_event_alert_priv);
         size_t pgws = 1; clEnqueueNDRangeKernel(cmd_q, priv_k, 1, NULL, &pgws, NULL, 0, NULL, NULL);
         clEnqueueReadBuffer(cmd_q, dev_event_alert_priv, CL_TRUE, 0, sizeof(int), &alert, 0, NULL, NULL);
-        if (alert) printf("\033[1;31m[ASIC PRIV ALERT] Unauthorized Elevation Attempt by %s!\033[0m\n", e->comm);
+        
+        if (alert == 1) {
+            printf("\033[1;31;5m[ASIC PRIV ALERT] UNAUTHORIZED ELEVATION (No TTY/Origin): %s!\033[0m\n", e->comm);
+        } else if (alert == 2) {
+            printf("\033[1;32m[ASIC PRIV INFO] Authorized Admin Action (UID 0): %s\033[0m\n", e->comm);
+        }
 
     } else if (e->type == EVENT_ME) {
         printf("[TRAFFIC] L3_ME   | HECI MSG: %02X %02X %02X %02X\n", (unsigned char)e->payload[0], (unsigned char)e->payload[1], (unsigned char)e->payload[2], (unsigned char)e->payload[3]);

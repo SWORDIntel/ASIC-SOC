@@ -20,10 +20,20 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx) {
     e->pid = bpf_get_current_pid_tgid() >> 32;
     e->uid = (int)bpf_get_current_uid_gid();
     
-    // Get process name
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    e->ppid = BPF_CORE_READ(task, real_parent, tgid);
+    e->loginuid = BPF_CORE_READ(task, loginuid.val);
+    e->sessionid = BPF_CORE_READ(task, sessionid);
     
-    // Get executable path from sys_enter_execve arguments
+    // Check for a controlling terminal (TTY)
+    struct signal_struct *signal = BPF_CORE_READ(task, signal);
+    struct tty_struct *tty = BPF_CORE_READ(signal, tty);
+    e->has_tty = tty ? 1 : 0;
+    
+    // Get process names
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    bpf_probe_read_kernel_str(&e->pcomm, sizeof(e->pcomm), BPF_CORE_READ(task, real_parent, comm));
+    
     const char *filename_ptr = (const char *)ctx->args[0];
     bpf_probe_read_user_str(&e->payload, MAX_PAYLOAD, filename_ptr);
     

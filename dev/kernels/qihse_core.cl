@@ -119,7 +119,17 @@ __kernel void qihse_entropy_analyzer(__global const float *s, __global float *a,
     a[gid] = v/w;
 }
 
-__kernel void priv_enforcer(const int old_uid, const int new_uid, __global int *alert) { if (old_uid != 0 && new_uid == 0) *alert = 1; }
+__kernel void priv_enforcer(const int uid, const int loginuid, const int has_tty, __global int *alert) { 
+    // Alert logic:
+    // Transition to root (uid 0) is suspicious IF:
+    // 1. No controlling terminal (Malware/Exploit often run background)
+    // 2. No original login (Action from system user, not human)
+    if (uid == 0 && (has_tty == 0 || loginuid == -1)) {
+        *alert = 1; 
+    } else if (uid == 0) {
+        *alert = 2; // Tag as 'AUTHORIZED' (User-initiated)
+    }
+}
 __kernel void me_sentry_core(__global const char *p, __global int *a) {
     int gid = get_global_id(0); const char s[] = {0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     int m = 1; for(int i=0; i<8; i++) { if(p[gid*8+i] != s[i]) { m=0; break; } } if(m) *a = 1;
