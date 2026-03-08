@@ -13,15 +13,20 @@ struct {
 
 // 1. EDR/Stack Sensor
 SEC("tp/syscalls/sys_enter_execve")
-int trace_execve(void *ctx) {
+int trace_execve(struct trace_event_raw_sys_enter *ctx) {
     struct asic_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return 0;
     e->type = EVENT_EXEC;
     e->pid = bpf_get_current_pid_tgid() >> 32;
     e->uid = (int)bpf_get_current_uid_gid();
-    const char *cmd_ptr;
-    bpf_probe_read_kernel(&cmd_ptr, sizeof(cmd_ptr), ctx + 16); 
-    if (cmd_ptr) bpf_probe_read_user_str(&e->payload, MAX_PAYLOAD, cmd_ptr);
+    
+    // Get process name
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    
+    // Get executable path from sys_enter_execve arguments
+    const char *filename_ptr = (const char *)ctx->args[0];
+    bpf_probe_read_user_str(&e->payload, MAX_PAYLOAD, filename_ptr);
+    
     bpf_ringbuf_submit(e, 0);
     return 0;
 }
@@ -44,17 +49,22 @@ int BPF_KPROBE(trace_mei_write, struct file *file, const char *ubuf, size_t coun
 // 3. Edge/Sideband Sensor (XDP)
 SEC("xdp")
 int xdp_me_monitor(struct xdp_md *ctx) {
-    void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
+    void *data = (void *)(long)ctx->data;
     
-    // Check for packets that look like NC-SI or management traffic
-    // (Simulated logic for POC)
+    // Safety check for reading first 64 bytes
     if (data + 64 > data_end) return XDP_PASS;
 
     struct asic_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
     if (!e) return XDP_PASS;
     e->type = EVENT_NET;
-    bpf_probe_read_kernel(&e->payload, 64, data);
+    
+    // Copy 64 bytes of packet data into the payload
+    #pragma clang loop unroll(full)
+    for (int i = 0; i < 64; i++) {
+        e->payload[i] = ((char *)data)[i];
+    }
+    
     bpf_ringbuf_submit(e, 0);
     
     return XDP_PASS;

@@ -12,7 +12,7 @@ except ImportError as e:
     print(f"Failed to import csec_datagen: {e}")
     sys.exit(1)
 
-def generate_threat_db(samples_per_class=1000, output_file='threat_tensors.bin'):
+def generate_threat_db(samples_per_class=2000, output_file='threat_tensors.bin'):
     print(f"--- Generating ASIC Threat Tensor DB ---")
     print(f"Samples per class: {samples_per_class}")
     
