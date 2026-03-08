@@ -42,6 +42,8 @@ class TacticalASICDashboard:
         self.stop_event = threading.Event()
         self.flash_state = False
         self.backend_process = None
+        self.last_gpu_temp = 32
+        self.last_temp_poll = 0
         self.window_title = "ASI_COMMAND_CENTER"
         sys.stdout.write(f"\x1b]2;{self.window_title}\x07")
 
@@ -59,12 +61,22 @@ class TacticalASICDashboard:
             except: pass
 
     def get_gpu_temp(self):
+        # Cache temperature polling - nvidia-smi is expensive!
+        now = time.time()
+        if now - self.last_temp_poll < 2.0:
+            return self.last_gpu_temp
+            
         try:
-            res = subprocess.run(["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"], capture_output=True, text=True)
+            res = subprocess.run(["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=0.5)
             if res.returncode == 0:
-                return int(res.stdout.strip())
-        except: pass
-        return 32 + (36 if self.hammer_mode else 0) + random.randint(-1, 1)
+                self.last_gpu_temp = int(res.stdout.strip())
+                self.last_temp_poll = now
+        except: 
+            # Fallback to simulated thermal drift if nvidia-smi fails or times out
+            self.last_gpu_temp = 32 + (36 if self.hammer_mode else 0) + random.randint(-1, 1)
+            self.last_temp_poll = now
+            
+        return self.last_gpu_temp
 
     def generate_layout(self) -> Layout:
         layout = Layout()
@@ -162,13 +174,11 @@ class TacticalASICDashboard:
         return Panel(table, title="[bold]DEFENSE MATRIX[/bold]", border_style="green")
 
     def get_traffic_panel(self):
-        if len(self.packet_stream) > 15: self.packet_stream.pop(0)
         table = Table(expand=True, box=None, show_header=False)
         for p in self.packet_stream: table.add_row(p)
         return Panel(table, title="[bold]L1/L2 TRAFFIC[/bold]", border_style="green")
 
     def get_me_panel(self):
-        if len(self.me_stream) > 15: self.me_stream.pop(0)
         table = Table(expand=True, box=None, show_header=False)
         for p in self.me_stream: table.add_row(p)
         return Panel(table, title="[bold]L3 ME TRAFFIC[/bold]", border_style="yellow")
@@ -309,6 +319,14 @@ class TacticalASICDashboard:
             elif "[ASIC L3+ ME ALERT]" in line:
                 self.alerts.append([ts, "[bold red]L3+ ME[/bold red]", "Unauthorized HECI"])
             elif "[ASIC L3 ALERT]" in line: self.alerts.append([ts, "[yellow]L3[/yellow]", "Cache Anomaly"])
+
+            # Maintenance: Prune streams in the monitor thread to prevent UI lag
+            if len(self.alerts) > 50: self.alerts.pop(0)
+            if len(self.me_stream) > 20: self.me_stream.pop(0)
+            if len(self.packet_stream) > 20: self.packet_stream.pop(0)
+            
+            # Yield slightly to allow UI thread to breathe if backend is hammering stdout
+            time.sleep(0.01)
 
     def signal_backend(self, sig):
         if not self.backend_process: return
