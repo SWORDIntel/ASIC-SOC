@@ -40,7 +40,7 @@ int main() {
         read(fd, &count, sizeof(uint64_t));
         printf("PMC_DATA:%lu\n", count);
         ioctl(fd, PERF_EVENT_IOC_RESET, 0);
-        usleep(100000); // 10Hz sampling
+        usleep(1000); // 1000Hz sampling (1ms)
     }
 
     close(fd);

