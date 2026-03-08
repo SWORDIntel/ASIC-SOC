@@ -20,6 +20,7 @@ struct asic_event {
     int pid;
     int ppid;
     int uid;
+    int puid;
     int loginuid; 
     int sessionid;
     int has_tty;

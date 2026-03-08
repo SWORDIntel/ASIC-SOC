@@ -22,6 +22,11 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx) {
     
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     e->ppid = BPF_CORE_READ(task, real_parent, tgid);
+    
+    // Capture Parent UID for Lineage Validation
+    struct cred *p_cred = BPF_CORE_READ(task, real_parent, cred);
+    e->puid = BPF_CORE_READ(p_cred, uid.val);
+    
     e->loginuid = BPF_CORE_READ(task, loginuid.val);
     e->sessionid = BPF_CORE_READ(task, sessionid);
     

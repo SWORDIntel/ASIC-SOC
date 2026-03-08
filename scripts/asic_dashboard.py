@@ -289,13 +289,17 @@ class TacticalASICDashboard:
                 threading.Thread(target=self.trigger_bios_beep, daemon=True).start()
             elif "[ASIC PRIV ALERT] UNAUTHORIZED" in line:
                 self.stats["L2_PRIV"] += 1
-                match = re.search(r'ELEVATION \(No TTY/Origin\): (.*)!', line)
+                match = re.search(r'ELEVATION \(Suspicious Lineage\): (.*)!', line)
                 proc = match.group(1) if match else "UNKNOWN"
                 self.alerts.append([ts, "[bold reverse red]CRITICAL[/bold reverse red]", f"UNAUTHORIZED ROOT: {proc}"])
             elif "[ASIC PRIV INFO] Authorized" in line:
                 match = re.search(r'Action \(UID 0\): (.*)', line)
                 proc = match.group(1) if match else "UNKNOWN"
                 self.alerts.append([ts, "[green]ADMIN[/green]", f"Sudo/Auth Action: {proc}"])
+            elif "[ASIC PRIV INFO] System Auth" in line:
+                match = re.search(r'System Auth \(Background/Root-Init\): (.*)', line)
+                proc = match.group(1) if match else "UNKNOWN"
+                self.alerts.append([ts, "[blue]SYSTEM[/bold blue]", f"Background Root: {proc}"])
             elif "[ASIC L2+ INTEL]" in line:
                 self.alerts.append([ts, "[yellow]L2+ CODE[/yellow]", "Semantic Match"])
             elif "[ASIC VECTOR ALERT]" in line: 

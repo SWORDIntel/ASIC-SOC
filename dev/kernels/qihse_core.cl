@@ -119,15 +119,22 @@ __kernel void qihse_entropy_analyzer(__global const float *s, __global float *a,
     a[gid] = v/w;
 }
 
-__kernel void priv_enforcer(const int uid, const int loginuid, const int has_tty, __global int *alert) { 
-    // Alert logic:
-    // Transition to root (uid 0) is suspicious IF:
-    // 1. No controlling terminal (Malware/Exploit often run background)
-    // 2. No original login (Action from system user, not human)
-    if (uid == 0 && (has_tty == 0 || loginuid == -1)) {
-        *alert = 1; 
-    } else if (uid == 0) {
-        *alert = 2; // Tag as 'AUTHORIZED' (User-initiated)
+__kernel void priv_enforcer(const int uid, const int loginuid, const int has_tty, const int puid, __global int *alert) { 
+    // High-Confidence Alert logic (UIV + Lineage):
+    if (uid == 0) {
+        // 1. Authorized Action: Originates from an active session with a terminal
+        if (has_tty == 1 && loginuid != -1) {
+            *alert = 2; // Tag as 'AUTHORIZED'
+        } 
+        // 2. Suspicious Inheritance: Non-root process spawned by non-root parent
+        //    WITHOUT a terminal (Classic exploit signature)
+        else if (has_tty == 0 && puid != 0) {
+            *alert = 1; // CRITICAL UNAUTHORIZED
+        }
+        // 3. Fallback for background system tasks (System-Auth)
+        else {
+            *alert = 3; // Tag as 'SYSTEM_SERVICE'
+        }
     }
 }
 __kernel void me_sentry_core(__global const char *p, __global int *a) {
