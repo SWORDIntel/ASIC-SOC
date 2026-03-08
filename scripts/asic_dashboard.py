@@ -145,8 +145,10 @@ class TacticalASICDashboard:
         table = Table(show_header=False, expand=True, box=None)
         table.add_row("L1 EDGE", "[green]SECURE[/green]")
         table.add_row("L2 EDR", "[bold red]IPS ACTIVE[/bold red]" if self.stats["L2_EDR"] > 0 else "[green]ACTIVE[/green]")
-        table.add_row("L2 PRIV", "[green]ENFORCED[/green]")
+        table.add_row("L2 PRIV", "[bold red]ESCALATION[/bold red]" if self.stats["L2_PRIV"] > 0 else "[green]ENFORCED[/green]")
         table.add_row("L3 HW", "[green]NOMINAL[/green]")
+        l3_me_status = "[bold red]HECI ALERT[/bold red]" if any("L3+ ME" in a[1] for a in self.alerts) else "[green]SENTRY ACTIVE[/green]"
+        table.add_row(" └─ [yellow]L3+ ME[/yellow]", l3_me_status)
         table.add_row("L4 RF", "[red]ALERT[/red]" if self.jamming_active else "[green]PASSIVE[/green]")
         if self.stats.get("Triangulation"):
             x, y, conf = self.stats["Triangulation"]
@@ -154,7 +156,8 @@ class TacticalASICDashboard:
             table.add_row(" └─ [yellow]CONF[/yellow]", f"[yellow]{conf} NODES[/yellow]")
         table.add_row("L5 SWARM", f"[cyan]{self.swarm_nodes} NODES ({self.swarm_syncs} SYNCS)[/cyan]")
         table.add_row("L6 CRYPTO", "[bold red]HAMMERING[/bold red]" if self.hammer_mode else "[cyan]ANALYZING[/cyan]")
-        table.add_row("VAULT", "[bold red]LOCKED[/bold red]" if self.vault_locked else "[green]UNLOCKED[/green]")
+        vault_status = "[bold red]LOCKED (IMMUTABLE)[/bold red]" if self.vault_locked else "[green]UNLOCKED (EVOLVING)[/green]"
+        table.add_row("VAULT", vault_status)
         table.add_row("BLACKBOX", "[cyan]RECORDING (VRAM)[/cyan]")
         return Panel(table, title="[bold]DEFENSE MATRIX[/bold]", border_style="green")
 
@@ -229,6 +232,8 @@ class TacticalASICDashboard:
                 if match: self.stats["Actual_Tensors"] = int(match.group(1))
             elif "[VAULT] LOCKED" in line: self.vault_locked = True
             elif "[VAULT] UNLOCKED" in line: self.vault_locked = False
+            elif "[VAULT] Evolution Suppressed" in line:
+                self.alerts.append([ts, "[bold red]VAULT[/bold red]", "Evolution Blocked (LOCKED)"])
             elif "[SWARM] L4 TRIANGULATION" in line:
                 match = re.search(r'Source detected at X:(.*) Y:(.*) \(Confidence: (\d+) nodes\)', line)
                 if match:
@@ -240,6 +245,11 @@ class TacticalASICDashboard:
                 # Light up a random area in tensor map
                 idx = random.randint(0, 127)
                 self.tensor_heatmap[idx] = 10
+            elif "[ASIC L4 RF] SPECTRUM CLEAN" in line:
+                self.jamming_active = False
+            elif "[IPS] NETWORK PACKET DROPPED" in line:
+                self.stats["L1_Net"] += 1
+                self.alerts.append([ts, "[bold red]L1 IPS[/bold red]", "[bold reverse red] PACKET DROPPED [/bold reverse red]"])
             elif "[IPS]" in line:
                 self.stats["L2_EDR"] += 1
                 match = re.search(r'Terminated Process (\d+)', line)
@@ -272,11 +282,17 @@ class TacticalASICDashboard:
                 self.alerts.append([ts, "[cyan]L4[/cyan]", "[bold blink red]JAMMING DETECTED[/bold blink red]"])
                 self.jamming_active = True
                 threading.Thread(target=self.trigger_bios_beep, daemon=True).start()
-            elif "[ASIC PRIV ALERT]" in line: self.alerts.append([ts, "[red]L2[/red]", "PrivEsc Detected"])
+            elif "[ASIC PRIV ALERT]" in line:
+                self.stats["L2_PRIV"] += 1
+                self.alerts.append([ts, "[red]L2 PRIV[/red]", "PrivEsc Detected"])
+            elif "[ASIC L2+ INTEL]" in line:
+                self.alerts.append([ts, "[yellow]L2+ CODE[/yellow]", "Semantic Match"])
             elif "[ASIC VECTOR ALERT]" in line: 
                 self.alerts.append([ts, "[bold magenta]L2[/bold magenta]", "[bold reverse magenta] APT MATCH [/bold reverse magenta]"])
                 idx = random.randint(0, 127)
                 self.tensor_heatmap[idx] = 10
+            elif "[ASIC L3+ ME ALERT]" in line:
+                self.alerts.append([ts, "[bold red]L3+ ME[/bold red]", "Unauthorized HECI"])
             elif "[ASIC L3 ALERT]" in line: self.alerts.append([ts, "[yellow]L3[/yellow]", "Cache Anomaly"])
 
     def handle_input(self):
@@ -289,9 +305,13 @@ class TacticalASICDashboard:
                     key = sys.stdin.read(1)
                     if not self.backend_process: continue
                     
+                    # Use sudo kill to ensure signals reach the root backend process
                     if key == 'h':
+                        subprocess.run(["sudo", "kill", "-USR1", str(self.backend_process.pid)], capture_output=True)
+                        # Also signal the process group just in case
                         os.killpg(os.getpgid(self.backend_process.pid), signal.SIGUSR1)
                     elif key == 'v':
+                        subprocess.run(["sudo", "kill", "-USR2", str(self.backend_process.pid)], capture_output=True)
                         os.killpg(os.getpgid(self.backend_process.pid), signal.SIGUSR2)
 
         finally:

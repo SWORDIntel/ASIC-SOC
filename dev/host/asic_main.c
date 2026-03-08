@@ -16,6 +16,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include "asic_common.h"
 
 // ASIC Overdrive Config
@@ -37,6 +38,9 @@ cl_kernel vec_k, super_k, entropy_k, priv_k, me_k, rf_k, mal_k, intel_k, code_k,
 cl_mem db_vectors_mem, dev_masks, dev_mal_sigs, dev_intel_keywords, dev_codebase, blackbox_mem;
 cl_mem dev_sum_x, dev_sum_xy, dev_sum_x2;
 
+// PRE-ALLOCATED BUFFER POOL (Zero-Overhead Hot Path)
+cl_mem dev_event_q, dev_event_scores, dev_event_alert_me, dev_event_alert_priv, dev_pmc_entropy;
+
 static int actual_db_size = 0;
 
 // Swarm Intelligence Globals
@@ -44,17 +48,34 @@ int swarm_sd;
 struct sockaddr_in swarm_addr;
 
 // Vault State
-static int vault_locked = 0;
-
 unsigned long threat_masks[NUM_MASKS] = { 0x2f6574632f736861, 0x63686d6f64202b78, 0x6375726c202d734c, 0x707974686f6e202d };
 unsigned long mal_sigs[NUM_MALWARE_SIGS] = { 0xDEADC0DE, 0xBEEFBABE, 0x1337C0DE };
 const char intel_keywords[INTEL_KEYWORD_COUNT][INTEL_KEYWORD_LEN] = { "0day            ", "exploit         ", "cve-2026        ", "payload         " };
 
-static float total_traces_processed = 0.0f;
-static int stop = 0;
-static int hammer_mode = 0;
+static volatile float total_traces_processed = 0.0f;
+static volatile sig_atomic_t stop = 0;
+static volatile sig_atomic_t hammer_mode = 0;
+static volatile sig_atomic_t vault_locked = 0;
 static int blackbox_offset = 0;
 static int node_id = 0;
+
+void save_progress() {
+    FILE *f = fopen("../data/crypto_progress.bin", "wb");
+    if (f) {
+        fwrite(&total_traces_processed, sizeof(float), 1, f);
+        fclose(f);
+    }
+}
+
+void load_progress() {
+    FILE *f = fopen("../data/crypto_progress.bin", "rb");
+    if (f) {
+        fread(&total_traces_processed, sizeof(float), 1, f);
+        fclose(f);
+        printf("[ASIC] Resuming from %.0f traces.\n", total_traces_processed);
+        fflush(stdout);
+    }
+}
 
 void sig_handler(int sig) { 
     if (sig == SIGINT) stop = 1; 
@@ -159,6 +180,9 @@ void *l4_rf_thread(void *arg) {
                 char msg[64];
                 snprintf(msg, sizeof(msg), "JAMMING:%d:%.1f", node_id, max_sig);
                 sendto(swarm_sd, msg, strlen(msg), 0, (struct sockaddr *)&swarm_addr, sizeof(swarm_addr));
+            } else {
+                printf("[ASIC L4 RF] SPECTRUM CLEAN (Max: %.1f dBm)\n", max_sig);
+                fflush(stdout);
             }
         }
     }
@@ -185,7 +209,7 @@ void init_asic() {
     fseek(f, 0, SEEK_END); size_t sz = ftell(f);
     char *src = malloc(sz + 1); rewind(f); fread(src, 1, sz, f); src[sz] = '\0'; fclose(f);
     cl_program prog = clCreateProgramWithSource(ctx, 1, (const char **)&src, NULL, &err);
-    clBuildProgram(prog, 0, NULL, NULL, NULL, NULL);
+    clBuildProgram(prog, 0, NULL, "-cl-mad-enable -cl-fast-relaxed-math", NULL, NULL);
     
     vec_k = clCreateKernel(prog, "qihse_vector_search", &err);
     mal_k = clCreateKernel(prog, "kp14_correlation_core", &err);
@@ -211,6 +235,13 @@ void init_asic() {
     dev_sum_xy = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(float) * NUM_HYPOTHESES, NULL, NULL);
     dev_sum_x2 = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(float) * NUM_HYPOTHESES, NULL, NULL);
 
+    // POOL INITIALIZATION
+    dev_event_q = clCreateBuffer(ctx, CL_MEM_READ_ONLY, VECTOR_DIMS * sizeof(float), NULL, NULL);
+    dev_event_scores = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, MAX_DB_SIZE * sizeof(float), NULL, NULL);
+    dev_event_alert_me = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(int), NULL, NULL);
+    dev_event_alert_priv = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(int), NULL, NULL);
+    dev_pmc_entropy = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, PMC_WINDOW * sizeof(float), NULL, NULL);
+
     swarm_sd = socket(AF_INET, SOCK_DGRAM, 0);
     memset(&swarm_addr, 0, sizeof(swarm_addr));
     swarm_addr.sin_family = AF_INET;
@@ -230,6 +261,7 @@ void init_asic() {
         float *h_db = (float *)malloc(actual_db_size * VECTOR_DIMS * sizeof(float));
         fread(h_db, sizeof(float), actual_db_size * VECTOR_DIMS, db_f); 
         fclose(db_f); 
+        // Using CL_MEM_USE_HOST_PTR for faster initial load on Fermi
         db_vectors_mem = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, actual_db_size * VECTOR_DIMS * sizeof(float), h_db, NULL);
         free(h_db);
     } else {
@@ -244,6 +276,7 @@ void init_asic() {
     clEnqueueWriteBuffer(cmd_q, dev_sum_x2, CL_TRUE, 0, sizeof(float)*NUM_HYPOTHESES, zeros, 0, NULL, NULL);
     
     free(zeros); free(src);
+    load_progress();
 }
 
 void *l3_hardware_thread(void *arg) {
@@ -258,6 +291,18 @@ void *l3_hardware_thread(void *arg) {
                 cl_mem dev_pmc = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(pmc_window), pmc_window, NULL);
                 int tw = PMC_WINDOW, nh = NUM_HYPOTHESES;
                 
+                // L3 Entropy Analysis (Side-Channel Detection)
+                clSetKernelArg(entropy_k, 0, sizeof(cl_mem), &dev_pmc);
+                clSetKernelArg(entropy_k, 1, sizeof(cl_mem), &dev_pmc_entropy);
+                int win = PMC_WINDOW / 2;
+                clSetKernelArg(entropy_k, 2, sizeof(int), &win);
+                size_t egws_entropy = PMC_WINDOW / 2;
+                clEnqueueNDRangeKernel(cmd_q, entropy_k, 1, NULL, &egws_entropy, NULL, 0, NULL, NULL);
+                float *entropy_res = malloc(sizeof(float) * egws_entropy);
+                clEnqueueReadBuffer(cmd_q, dev_pmc_entropy, CL_TRUE, 0, sizeof(float)*egws_entropy, entropy_res, 0, NULL, NULL);
+                for(int i=0; i<egws_entropy; i++) if(entropy_res[i] > 1000.0f) printf("\033[1;33m[ASIC L3 ALERT] Cache Anomaly / Side-Channel Detected (Var: %.1f)\033[0m\n", entropy_res[i]);
+                free(entropy_res);
+
                 if (hammer_mode) {
                     // Hammer Mode: Use float4 vectorized kernel with 8x iterations per trace for 100% spike
                     int v_nh = NUM_HYPOTHESES / 4;
@@ -285,6 +330,7 @@ void *l3_hardware_thread(void *arg) {
                 }
                 
                 if ((int)total_traces_processed % 50 == 0) {
+                    save_progress(); // Persist progress
                     cl_mem dev_res = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, sizeof(float)*NUM_HYPOTHESES, NULL, NULL);
                     clSetKernelArg(me_finalizer_k, 0, sizeof(cl_mem), &dev_sum_x);
                     clSetKernelArg(me_finalizer_k, 1, sizeof(cl_mem), &dev_sum_xy);
@@ -311,6 +357,7 @@ void *l3_hardware_thread(void *arg) {
     }
     pclose(pipe); return NULL;
 }
+
 
 void *me_activator_thread(void *arg) {
     unsigned char payloads[4][4] = {
@@ -339,73 +386,164 @@ void *me_activator_thread(void *arg) {
     return NULL;
 }
 
+void save_db() {
+    FILE *f = fopen("threat_tensors.bin", "wb");
+    if (f) {
+        float *h_db = malloc(actual_db_size * VECTOR_DIMS * sizeof(float));
+        clEnqueueReadBuffer(cmd_q, db_vectors_mem, CL_TRUE, 0, actual_db_size * VECTOR_DIMS * sizeof(float), h_db, 0, NULL, NULL);
+        fwrite(h_db, sizeof(float), actual_db_size * VECTOR_DIMS, f);
+        fclose(f);
+        free(h_db);
+        printf("[ASIC] Threat Tensor DB Persisted to Disk.\n");
+        fflush(stdout);
+    }
+}
+
+void *code_intelligence_thread(void *arg) {
+    const char *pipe_path = "/tmp/asic_code_feed";
+    mkfifo(pipe_path, 0666);
+    int fd = open(pipe_path, O_RDONLY);
+    float vector[VECTOR_DIMS];
+    while (!stop) {
+        if (read(fd, vector, sizeof(vector)) == sizeof(vector)) {
+            // Optimized Fermi stage: Use READ_ONLY for constants
+            cl_mem dv = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(vector), vector, NULL);
+            cl_mem ds = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, sizeof(float) * MAX_CODE_SNIPPETS, NULL, NULL);
+            int n = MAX_CODE_SNIPPETS;
+            clSetKernelArg(code_k, 0, sizeof(cl_mem), &dev_codebase);
+            clSetKernelArg(code_k, 1, sizeof(cl_mem), &dv);
+            clSetKernelArg(code_k, 2, sizeof(cl_mem), &ds);
+            clSetKernelArg(code_k, 3, sizeof(int), &n);
+            size_t gws = MAX_CODE_SNIPPETS;
+            clEnqueueNDRangeKernel(cmd_q, code_k, 1, NULL, &gws, NULL, 0, NULL, NULL);
+            float *scores = malloc(sizeof(float) * n);
+            clEnqueueReadBuffer(cmd_q, ds, CL_TRUE, 0, sizeof(float) * n, scores, 0, NULL, NULL);
+            float ms = 0; for(int i=0; i<n; i++) if(scores[i]>ms) ms=scores[i];
+            if (ms > 0.85f) printf("\033[1;33m[ASIC L2+ INTEL] Semantic Code Match Detected! (%.2f)\033[0m\n", ms);
+            free(scores); clReleaseMemObject(dv); clReleaseMemObject(ds);
+            
+            // Also update codebase (Hebbian offloading)
+            static int codebase_ptr = 0;
+            clEnqueueWriteBuffer(cmd_q, dev_codebase, CL_FALSE, codebase_ptr * sizeof(vector), sizeof(vector), vector, 0, NULL, NULL);
+            codebase_ptr = (codebase_ptr + 1) % MAX_CODE_SNIPPETS;
+        }
+        usleep(10000);
+    }
+    close(fd); return NULL;
+}
+
 int handle_event(void *cb_ctx, void *data, size_t data_sz) {
     struct asic_event *e = data;
+
+    // 1. Blackbox Logging (Hot Path VRAM Circular Buffer)
+    cl_mem dev_payload = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, MAX_PAYLOAD, e->payload, NULL);
+    clSetKernelArg(blackbox_k, 0, sizeof(cl_mem), &blackbox_mem);
+    clSetKernelArg(blackbox_k, 1, sizeof(cl_mem), &dev_payload);
+    clSetKernelArg(blackbox_k, 2, sizeof(int), &blackbox_offset);
+    int bs = BLACKBOX_SIZE, ds_val = MAX_PAYLOAD;
+    clSetKernelArg(blackbox_k, 3, sizeof(int), &bs);
+    clSetKernelArg(blackbox_k, 4, sizeof(int), &ds_val);
+    size_t bb_gws = MAX_PAYLOAD;
+    clEnqueueNDRangeKernel(cmd_q, blackbox_k, 1, NULL, &bb_gws, NULL, 0, NULL, NULL);
+    blackbox_offset = (blackbox_offset + MAX_PAYLOAD) % BLACKBOX_SIZE;
+
     if (e->type == EVENT_NET) {
         printf("[TRAFFIC] L1_EDGE | %02X %02X %02X %02X %02X...\n", (unsigned char)e->payload[0], (unsigned char)e->payload[1], (unsigned char)e->payload[2], (unsigned char)e->payload[3], (unsigned char)e->payload[4]);
     } else if (e->type == EVENT_EXEC) {
         printf("[TRAFFIC] L2_EDR  | %s -> %s\n", e->comm, e->payload);
+        
+        // Dispatch to PrivEnforcer Kernel (Pre-allocated)
+        int alert = 0;
+        clEnqueueWriteBuffer(cmd_q, dev_event_alert_priv, CL_TRUE, 0, sizeof(int), &alert, 0, NULL, NULL);
+        clSetKernelArg(priv_k, 0, sizeof(int), &e->uid);
+        int zero = 0;
+        clSetKernelArg(priv_k, 1, sizeof(int), &zero); 
+        clSetKernelArg(priv_k, 2, sizeof(cl_mem), &dev_event_alert_priv);
+        size_t pgws = 1; clEnqueueNDRangeKernel(cmd_q, priv_k, 1, NULL, &pgws, NULL, 0, NULL, NULL);
+        clEnqueueReadBuffer(cmd_q, dev_event_alert_priv, CL_TRUE, 0, sizeof(int), &alert, 0, NULL, NULL);
+        if (alert) printf("\033[1;31m[ASIC PRIV ALERT] Unauthorized Elevation Attempt by %s!\033[0m\n", e->comm);
+
     } else if (e->type == EVENT_ME) {
         printf("[TRAFFIC] L3_ME   | HECI MSG: %02X %02X %02X %02X\n", (unsigned char)e->payload[0], (unsigned char)e->payload[1], (unsigned char)e->payload[2], (unsigned char)e->payload[3]);
+        
+        // Dispatch to ME Sentry Kernel (Pre-allocated)
+        int alert = 0;
+        clEnqueueWriteBuffer(cmd_q, dev_event_alert_me, CL_TRUE, 0, sizeof(int), &alert, 0, NULL, NULL);
+        clSetKernelArg(me_k, 0, sizeof(cl_mem), &dev_payload);
+        clSetKernelArg(me_k, 1, sizeof(cl_mem), &dev_event_alert_me);
+        size_t mgws = 1; clEnqueueNDRangeKernel(cmd_q, me_k, 1, NULL, &mgws, NULL, 0, NULL, NULL);
+        clEnqueueReadBuffer(cmd_q, dev_event_alert_me, CL_TRUE, 0, sizeof(int), &alert, 0, NULL, NULL);
+        if (alert) printf("\033[1;31m[ASIC L3+ ME ALERT] Unauthorized Management Engine Command Detected!\033[0m\n");
     }
     fflush(stdout);
 
     if (e->type == EVENT_NET || e->type == EVENT_EXEC) {
-        if (e->type == EVENT_EXEC) {
-            float q[VECTOR_DIMS] = {0.0f};
-            for(int i=0; i<MAX_PAYLOAD && i < 160; i++) {
-                unsigned char b = (unsigned char)e->payload[i];
-                if(b == 0) break;
-                q[b % VECTOR_DIMS] += 1.0f;
-            }
-            float q_norm = 0.0f;
-            for(int i=0; i<VECTOR_DIMS; i++) q_norm += q[i]*q[i];
-            if(q_norm > 0) {
-                q_norm = sqrt(q_norm);
-                for(int i=0; i<VECTOR_DIMS; i++) q[i] /= q_norm;
-            }
-            cl_mem dq = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(q), q, NULL);
-            cl_mem ds = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, sizeof(float)*actual_db_size, NULL, NULL);
-            int ndb = actual_db_size;
-            clSetKernelArg(vec_k, 0, sizeof(cl_mem), &db_vectors_mem);
-            clSetKernelArg(vec_k, 1, sizeof(cl_mem), &dq);
-            clSetKernelArg(vec_k, 2, sizeof(cl_mem), &ds);
-            clSetKernelArg(vec_k, 3, sizeof(int), &ndb);
-            size_t gws = actual_db_size; clEnqueueNDRangeKernel(cmd_q, vec_k, 1, NULL, &gws, NULL, 0, NULL, NULL);
-            float *sc = malloc(sizeof(float) * actual_db_size);
-            clEnqueueReadBuffer(cmd_q, ds, CL_TRUE, 0, sizeof(float) * actual_db_size, sc, 0, NULL, NULL);
-            float ms = 0.0f; int bt = 0;
-            for(int i=0; i<actual_db_size; i++) { if(sc[i] > ms) { ms = sc[i]; bt = i; } }
-            if(ms > 0.92f) {
-                int apt_id = bt / 2000;
+        float q[VECTOR_DIMS] = {0.0f};
+        for(int i=0; i<MAX_PAYLOAD && i < 160; i++) {
+            unsigned char b = (unsigned char)e->payload[i];
+            if(b == 0 && e->type == EVENT_EXEC) break; // exec payloads are strings
+            q[b % VECTOR_DIMS] += 1.0f;
+        }
+        float q_norm = 0.0f;
+        for(int i=0; i<VECTOR_DIMS; i++) q_norm += q[i]*q[i];
+        if(q_norm > 0) {
+            q_norm = sqrt(q_norm);
+            for(int i=0; i<VECTOR_DIMS; i++) q[i] /= q_norm;
+        }
+        // Use Pre-allocated Hot Path Buffers
+        clEnqueueWriteBuffer(cmd_q, dev_event_q, CL_TRUE, 0, sizeof(q), q, 0, NULL, NULL);
+        int ndb = actual_db_size;
+        clSetKernelArg(vec_k, 0, sizeof(cl_mem), &db_vectors_mem);
+        clSetKernelArg(vec_k, 1, sizeof(cl_mem), &dev_event_q);
+        clSetKernelArg(vec_k, 2, sizeof(cl_mem), &dev_event_scores);
+        clSetKernelArg(vec_k, 3, sizeof(int), &ndb);
+        size_t gws = actual_db_size; clEnqueueNDRangeKernel(cmd_q, vec_k, 1, NULL, &gws, NULL, 0, NULL, NULL);
+        float *sc = malloc(sizeof(float) * actual_db_size);
+        clEnqueueReadBuffer(cmd_q, dev_event_scores, CL_TRUE, 0, sizeof(float) * actual_db_size, sc, 0, NULL, NULL);
+        float ms = 0.0f; int bt = 0;
+        for(int i=0; i<actual_db_size; i++) { if(sc[i] > ms) { ms = sc[i]; bt = i; } }
+        
+        if(ms > 0.92f) {
+            int apt_id = bt / 2000;
+            if (e->type == EVENT_EXEC) {
                 if (apt_id == 8) printf("\033[1;31;5m[ASIC ALERT] CRITICAL: VAULT 7 / MARBLE MATCH! (%.2f)\033[0m\n", ms);
                 else if (apt_id == 9) printf("\033[1;31;5m[ASIC ALERT] CRITICAL: FIRMWARE IMPLANT DETECTED! (%.2f)\033[0m\n", ms);
                 else printf("\033[1;35m[ASIC VECTOR ALERT] APT %d Match! (%.2f)\033[0m\n", apt_id, ms);
                 printf("[IPS] Terminated Process %d\n", e->pid);
                 kill(e->pid, SIGKILL);
-            } else if (ms > 0.60f) {
+            } else {
+                printf("\033[1;31;5m[ASIC L1 ALERT] MALICIOUS PACKET DROPPED (Score: %.2f)\033[0m\n", ms);
+                printf("[IPS] NETWORK PACKET DROPPED\n");
+            }
+        } else if (ms > 0.60f) {
+            if (!vault_locked) {
                 float lr = 0.05f;
                 clSetKernelArg(evolution_k, 0, sizeof(cl_mem), &db_vectors_mem);
-                clSetKernelArg(evolution_k, 1, sizeof(cl_mem), &dq);
+                clSetKernelArg(evolution_k, 1, sizeof(cl_mem), &dev_event_q);
                 clSetKernelArg(evolution_k, 2, sizeof(int), &bt);
                 clSetKernelArg(evolution_k, 3, sizeof(float), &lr);
                 size_t egws = VECTOR_DIMS; clEnqueueNDRangeKernel(cmd_q, evolution_k, 1, NULL, &egws, NULL, 0, NULL, NULL);
                 printf("[ASIC EVOLVE] Tensor DB optimized (Vector %d).\n", bt);
                 char msg[] = "EVOLUTION";
                 sendto(swarm_sd, msg, sizeof(msg), 0, (struct sockaddr *)&swarm_addr, sizeof(swarm_addr));
+            } else {
+                printf("[VAULT] Evolution Suppressed (Locked)\n");
+                fflush(stdout);
             }
-            free(sc); clReleaseMemObject(dq); clReleaseMemObject(ds);
         }
+        free(sc);
+        
         cl_mem dp = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, MAX_PAYLOAD, e->payload, NULL);
         
-        if (blackbox_offset + 256 <= BLACKBOX_SIZE) {
-            clSetKernelArg(blackbox_k, 0, sizeof(cl_mem), &blackbox_mem);
-            clSetKernelArg(blackbox_k, 1, sizeof(cl_mem), &dp);
-            clSetKernelArg(blackbox_k, 2, sizeof(int), &blackbox_offset);
-            size_t bb_gws = 256;
-            clEnqueueNDRangeKernel(cmd_q, blackbox_k, 1, NULL, &bb_gws, NULL, 0, NULL, NULL);
-            blackbox_offset += 256;
-        }
+        int ds_val = MAX_PAYLOAD, bs = BLACKBOX_SIZE;
+        clSetKernelArg(blackbox_k, 0, sizeof(cl_mem), &blackbox_mem);
+        clSetKernelArg(blackbox_k, 1, sizeof(cl_mem), &dp);
+        clSetKernelArg(blackbox_k, 2, sizeof(int), &blackbox_offset);
+        clSetKernelArg(blackbox_k, 3, sizeof(int), &bs);
+        clSetKernelArg(blackbox_k, 4, sizeof(int), &ds_val);
+        size_t bb_gws = MAX_PAYLOAD;
+        clEnqueueNDRangeKernel(cmd_q, blackbox_k, 1, NULL, &bb_gws, NULL, 0, NULL, NULL);
+        blackbox_offset = (blackbox_offset + MAX_PAYLOAD) % BLACKBOX_SIZE;
 
         cl_mem dr = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, sizeof(int)*NUM_MASKS, NULL, NULL);
         int blk = MAX_PAYLOAD / 8, nmk = NUM_MASKS;
@@ -414,7 +552,7 @@ int handle_event(void *cb_ctx, void *data, size_t data_sz) {
         clSetKernelArg(super_k, 2, sizeof(cl_mem), &dr);
         clSetKernelArg(super_k, 3, sizeof(int), &blk);
         clSetKernelArg(super_k, 4, sizeof(int), &nmk);
-        size_t gws = blk; clEnqueueNDRangeKernel(cmd_q, super_k, 1, NULL, &gws, NULL, 0, NULL, NULL);
+        size_t super_gws = blk; clEnqueueNDRangeKernel(cmd_q, super_k, 1, NULL, &super_gws, NULL, 0, NULL, NULL);
         int res[NUM_MASKS]; clEnqueueReadBuffer(cmd_q, dr, CL_TRUE, 0, sizeof(res), res, 0, NULL, NULL);
         for(int i=0; i<nmk; i++) if(res[i] > 0) printf("\033[1;31m[ASIC ALERT] Signature Match %d!\033[0m\n", i);
         clReleaseMemObject(dp); clReleaseMemObject(dr);
@@ -436,12 +574,13 @@ int main(int argc, char **argv) {
     signal(SIGUSR1, sig_handler);
     signal(SIGUSR2, sig_handler);
     init_asic();
-    pthread_t comp_t, l3_t, mea_t, swarm_t, l4_t;
+    pthread_t comp_t, l3_t, mea_t, swarm_t, l4_t, code_t;
     pthread_create(&comp_t, NULL, perform_compliance_check, NULL);
     pthread_create(&l3_t, NULL, l3_hardware_thread, NULL);
     pthread_create(&mea_t, NULL, me_activator_thread, NULL);
     pthread_create(&swarm_t, NULL, swarm_listener, NULL);
     pthread_create(&l4_t, NULL, l4_rf_thread, (void*)iface);
+    pthread_create(&code_t, NULL, code_intelligence_thread, NULL);
 
     struct bpf_object *obj = bpf_object__open_file("asic_sensor.bpf.o", NULL);
     if (!obj || bpf_object__load(obj)) { printf("BPF Load Fail\n"); return 1; }
@@ -456,7 +595,11 @@ int main(int argc, char **argv) {
     printf("--- ASI COMMAND CENTER BACKEND ONLINE ---\n");
     while(!stop) if (rb) ring_buffer__poll(rb, 100);
     
-    printf("\n[ASIC] Shutting down. Dumping Blackbox...\n");
+    printf("\n[ASIC] Shutting down. Saving Progress...\n");
+    save_progress();
+    save_db();
+
+    printf("[ASIC] Dumping Blackbox...\n");
     char *bb_buf = malloc(BLACKBOX_SIZE);
     if (bb_buf) {
         clEnqueueReadBuffer(cmd_q, blackbox_mem, CL_TRUE, 0, BLACKBOX_SIZE, bb_buf, 0, NULL, NULL);
