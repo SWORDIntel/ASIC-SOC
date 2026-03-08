@@ -2,7 +2,7 @@
 CC=gcc
 CLANG=clang-18
 CFLAGS=-O2 -Wall
-LIBS=-lOpenCL -lbpf -lpthread -lm
+LIBS=-lOpenCL -lbpf -lpthread -lm -lpci
 
 all: asic_main asic_sensor.bpf.o pmc_sensor
 

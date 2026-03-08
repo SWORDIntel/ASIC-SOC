@@ -18,6 +18,7 @@
 #include <arpa/inet.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <pci/pci.h>
 #include "asic_common.h"
 
 // ASIC Overdrive Config
@@ -60,6 +61,27 @@ static volatile sig_atomic_t vault_locked = 0;
 static int blackbox_offset = 0;
 static int node_id = 0;
 
+// PCI Access for ME Hammering
+struct pci_access *pacc;
+struct pci_dev *me_dev = NULL;
+
+void init_pci() {
+    pacc = pci_alloc();
+    pci_init(pacc);
+    pci_scan_bus(pacc);
+    
+    // Find Intel ME device (00:16.0)
+    for (struct pci_dev *dev = pacc->devices; dev; dev = dev->next) {
+        pci_fill_info(dev, PCI_FILL_IDENT);
+        if (dev->bus == 0 && dev->dev == 22 && dev->func == 0) {
+            me_dev = dev;
+            printf("[ASIC] Target ME Device Found: %02x:%02x.%d\n", dev->bus, dev->dev, dev->func);
+            break;
+        }
+    }
+    if (!me_dev) printf("[ASIC] WARNING: Intel ME PCI Device (00:16.0) not found!\n");
+}
+
 void save_progress() {
     FILE *f = fopen("../data/crypto_progress.bin", "wb");
     if (f) {
@@ -93,12 +115,29 @@ void sig_handler(int sig) {
     }
 }
 
-// Node positioning for triangulation (Static for simulation)
-// In a real deployment, these would come from GPS/Config
+// Node positioning for triangulation (Dynamic loading from .nodes.conf)
 float node_coords[10][2] = {
     {0.0, 0.0}, {100.0, 0.0}, {0.0, 100.0}, {100.0, 100.0},
-    {50.0, 50.0}, {20.0, 80.0}, {80.0, 20.0}, {10.0, 10.0}
+    {50.0, 50.0}, {20.0, 80.0}, {80.0, 20.0}, {10.0, 10.0},
+    {90.0, 90.0}, {50.0, 0.0}
 };
+
+void load_node_config() {
+    FILE *f = fopen(".nodes.conf", "r");
+    if (f) {
+        int id; float x, y;
+        while (fscanf(f, "%d %f %f", &id, &x, &y) == 3) {
+            if (id >= 0 && id < 10) {
+                node_coords[id][0] = x;
+                node_coords[id][1] = y;
+            }
+        }
+        fclose(f);
+        printf("[ASIC] Loaded Dynamic Swarm Coordinates.\n");
+    } else {
+        printf("[ASIC] Using Default Static Swarm Coordinates.\n");
+    }
+}
 
 void *swarm_listener(void *arg) {
     int sd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -387,13 +426,9 @@ void *me_activator_thread(void *arg) {
                 write(fd, payloads[(p_idx + 1) % 4], 4);
 
                 // 2. PCI Config Space Hammering (Triggers bus-level leakage)
-                // We attempt to read the ME PCI Device ID (usually 00:16.0)
-                // In a real system, we'd use libpci, but here we simulate bus pressure
-                int pci_fd = open("/sys/bus/pci/devices/0000:00:16.0/config", O_RDONLY);
-                if (pci_fd >= 0) {
-                    unsigned int val;
-                    for(int i=0; i<10; i++) read(pci_fd, &val, 4);
-                    close(pci_fd);
+                // We rapidly read the ME Device Vendor ID to trigger side-channel leakage
+                if (me_dev) {
+                    for(int i=0; i<10; i++) pci_read_long(me_dev, 0);
                 }
 
                 p_idx = (p_idx + 1) % 4;
@@ -604,6 +639,7 @@ int main(int argc, char **argv) {
     signal(SIGUSR1, sig_handler);
     signal(SIGUSR2, sig_handler);
     init_asic();
+    init_pci();
     pthread_t comp_t, l3_t, mea_t, swarm_t, l4_t, code_t;
     pthread_create(&comp_t, NULL, perform_compliance_check, NULL);
     pthread_create(&l3_t, NULL, l3_hardware_thread, NULL);
