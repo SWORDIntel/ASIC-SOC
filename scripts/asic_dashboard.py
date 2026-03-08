@@ -28,7 +28,7 @@ class TacticalASICDashboard:
         self.stats = {
             "L1_Net": 0, "L2_EDR": 0, "L2_PRIV": 0, 
             "L3_HW": 0, "L4_RF": 0, "ASI_Load": 15,
-            "Tensors_Optimized": 0
+            "Tensors_Optimized": 0, "Actual_Tensors": 0
         }
         self.cpu_history = []
         self.tensor_heatmap = [0] * 128 # 16x8 grid representing Threat DB
@@ -122,7 +122,9 @@ class TacticalASICDashboard:
         table.add_row("ASIC CORE", "[bold cyan]FERMI-QIHSE v2.5[/bold cyan]", "[cyan]ONLINE[/cyan]")
         table.add_row("COMPUTE LOAD", f"[bold {'red' if self.hammer_mode else 'green'}]{load}%[/bold {'red' if self.hammer_mode else 'green'}]", 
                       "[bold red]MAXIMUM UTILIZATION[/bold red]" if self.hammer_mode else "[green]RESERVE CAPACITY HIGH[/green]")
-        table.add_row("TENSOR DB", "[bold yellow]20,000 VECTORS[/bold yellow]", f"[yellow]+{self.stats.get('Tensors_Optimized', 0)} EVOLVED[/yellow]")
+        
+        t_count = self.stats.get("Actual_Tensors", 0)
+        table.add_row("TENSOR DB", f"[bold yellow]{t_count:,} VECTORS[/bold yellow]", f"[yellow]+{self.stats.get('Tensors_Optimized', 0)} EVOLVED[/yellow]")
         
         temp_color = "red" if gpu_temp > 75 else "orange3" if gpu_temp > 60 else "green"
         table.add_row("GPU TEMP", f"[bold {temp_color}]{gpu_temp}°C[/bold {temp_color}]", 
@@ -189,7 +191,8 @@ class TacticalASICDashboard:
             lines.append(line_str)
         
         text = "\n".join(lines)
-        return Panel(text, title="[bold]L5 TENSOR MAP (20k)[/bold]", border_style="blue")
+        t_k = self.stats.get("Actual_Tensors", 0) // 1000
+        return Panel(text, title=f"[bold]L5 TENSOR MAP ({t_k}k)[/bold]", border_style="blue")
 
     def monitor_asic(self):
         dev_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dev"))
@@ -205,6 +208,9 @@ class TacticalASICDashboard:
             
             if "[HAMMER: ON]" in line: self.hammer_mode = True
             elif "[HAMMER: OFF]" in line: self.hammer_mode = False
+            elif "[ASIC] Loaded" in line:
+                match = re.search(r'Loaded (\d+) Threat Tensors', line)
+                if match: self.stats["Actual_Tensors"] = int(match.group(1))
             elif "[VAULT] LOCKED" in line: self.vault_locked = True
             elif "[VAULT] UNLOCKED" in line: self.vault_locked = False
             elif "[SWARM]" in line:
