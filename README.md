@@ -20,7 +20,8 @@ The system monitors the entire silicon-to-signal spectrum:
 | **L6** | **CRYPTO** | Side-Channel DPA | **Cryptanalysis Core** | long-term Intel ME Key Extraction |
 
 ## 3. Key Technical Features
-- **Isolated Brain**: All detection logic and the 8,000-vector Threat Tensor DB live in GPU VRAM (1.2 GB), invisible to CPU-bound rootkits.
+- **Isolated Brain**: All detection logic and the **20,000-vector Threat Tensor DB** live in GPU VRAM (1.2 GB), invisible to CPU-bound rootkits.
+  - *Breakdown*: 16,000 APT Profile vectors (8 classes) + 2,000 Vault 7 (Marble) vectors + 2,000 Firmware (UEFI/SMM) Implant vectors.
 - **QIHSE Engine**: Quantum-Inspired High-Speed Engine capable of performing millions of vector similarity searches in a single parallel pass (>1.8 GB/s).
 - **Auto-Evolution (L5)**: Real-time Hebbian learning shifts the Threat Tensor DB to adapt to polymorphic drift and zero-day variants using spare GPU cycles.
 - **Side-Channel Cryptanalysis (L6)**: High-confidence Pearson Correlation core performs long-term Differential Power/Timing Analysis (DPA) against Intel ME operations.

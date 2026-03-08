@@ -31,8 +31,12 @@ class TacticalASICDashboard:
             "Tensors_Optimized": 0
         }
         self.cpu_history = []
+        self.tensor_heatmap = [0] * 128 # 16x8 grid representing Threat DB
         self.jamming_active = False
         self.hammer_mode = False
+        self.vault_locked = False
+        self.swarm_nodes = 1
+        self.swarm_syncs = 0
         self.crypto_corr = 0.0
         self.stop_event = threading.Event()
         self.flash_state = False
@@ -75,9 +79,13 @@ class TacticalASICDashboard:
         )
         layout["main"].split_row(
             Layout(name="traffic_stream", ratio=2),
-            Layout(name="me_stream", ratio=3),
-            Layout(name="intel_feed", ratio=3),
+            Layout(name="me_stream", ratio=2),
+            Layout(name="middle_col", ratio=3),
             Layout(name="layer_status", ratio=2)
+        )
+        layout["middle_col"].split_column(
+            Layout(name="intel_feed", ratio=1),
+            Layout(name="tensor_map", ratio=1)
         )
         return layout
 
@@ -114,7 +122,7 @@ class TacticalASICDashboard:
         table.add_row("ASIC CORE", "[bold cyan]FERMI-QIHSE v2.5[/bold cyan]", "[cyan]ONLINE[/cyan]")
         table.add_row("COMPUTE LOAD", f"[bold {'red' if self.hammer_mode else 'green'}]{load}%[/bold {'red' if self.hammer_mode else 'green'}]", 
                       "[bold red]MAXIMUM UTILIZATION[/bold red]" if self.hammer_mode else "[green]RESERVE CAPACITY HIGH[/green]")
-        table.add_row("TENSOR DB", "[bold yellow]16,000 VECTORS[/bold yellow]", f"[yellow]+{self.stats.get('Tensors_Optimized', 0)} EVOLVED[/yellow]")
+        table.add_row("TENSOR DB", "[bold yellow]20,000 VECTORS[/bold yellow]", f"[yellow]+{self.stats.get('Tensors_Optimized', 0)} EVOLVED[/yellow]")
         
         temp_color = "red" if gpu_temp > 75 else "orange3" if gpu_temp > 60 else "green"
         table.add_row("GPU TEMP", f"[bold {temp_color}]{gpu_temp}°C[/bold {temp_color}]", 
@@ -133,14 +141,15 @@ class TacticalASICDashboard:
     def get_layer_status(self):
         table = Table(show_header=False, expand=True, box=None)
         table.add_row("L1 EDGE", "[green]SECURE[/green]")
-        table.add_row("L2 EDR", "[green]ACTIVE[/green]")
+        table.add_row("L2 EDR", "[bold red]IPS ACTIVE[/bold red]" if self.stats["L2_EDR"] > 0 else "[green]ACTIVE[/green]")
         table.add_row("L2 PRIV", "[green]ENFORCED[/green]")
-        table.add_row("L2 CODE", "[cyan]OFFLOADING[/cyan]")
         table.add_row("L3 HW", "[green]NOMINAL[/green]")
         table.add_row("L4 RF", "[red]ALERT[/red]" if self.jamming_active else "[green]PASSIVE[/green]")
-        table.add_row("L5 EVOLVE", "[magenta]CONTINUOUS[/magenta]" if self.stats.get("Tensors_Optimized", 0) > 0 else "[dim]STANDBY[/dim]")
+        table.add_row("L5 SWARM", f"[cyan]{self.swarm_nodes} NODES ({self.swarm_syncs} SYNCS)[/cyan]")
         table.add_row("L6 CRYPTO", "[bold red]HAMMERING[/bold red]" if self.hammer_mode else "[cyan]ANALYZING[/cyan]")
-        return Panel(table, title="[bold]DEFENSE[/bold]", border_style="green")
+        table.add_row("VAULT", "[bold red]LOCKED[/bold red]" if self.vault_locked else "[green]UNLOCKED[/green]")
+        table.add_row("BLACKBOX", "[cyan]RECORDING (VRAM)[/cyan]")
+        return Panel(table, title="[bold]DEFENSE MATRIX[/bold]", border_style="green")
 
     def get_traffic_panel(self):
         if len(self.packet_stream) > 15: self.packet_stream.pop(0)
@@ -159,13 +168,34 @@ class TacticalASICDashboard:
         table.add_column("UTC", width=8)
         table.add_column("LAYER", width=8)
         table.add_column("THREAT INTELLIGENCE", style="bold")
-        for alert in self.alerts[-10:]: table.add_row(*alert)
+        for alert in self.alerts[-7:]: table.add_row(*alert)
         return Panel(table, title="[bold]ASI INTEL FEED[/bold]", border_style="magenta")
+
+    def get_tensor_map(self):
+        # Decay heatmap
+        for i in range(len(self.tensor_heatmap)):
+            if self.tensor_heatmap[i] > 0: self.tensor_heatmap[i] -= 1
+        
+        # Render map
+        chars = " ░▒▓█"
+        lines = []
+        for row in range(8):
+            line_str = ""
+            for col in range(16):
+                val = self.tensor_heatmap[row * 16 + col]
+                char_idx = min(val, 4)
+                color = "magenta" if val > 2 else "cyan" if val > 0 else "blue"
+                line_str += f"[{color}]{chars[char_idx]}[/{color}]"
+            lines.append(line_str)
+        
+        text = "\n".join(lines)
+        return Panel(text, title="[bold]L5 TENSOR MAP (20k)[/bold]", border_style="blue")
 
     def monitor_asic(self):
         dev_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dev"))
         cmd = ["sudo", "stdbuf", "-oL", "./asic_main"] + self.interfaces
-        self.backend_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=dev_dir)
+        # Use preexec_fn to create a process group so we can signal through sudo
+        self.backend_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=dev_dir, preexec_fn=os.setpgrp)
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@~])')
         while not self.stop_event.is_set():
             raw_line = self.backend_process.stdout.readline()
@@ -175,6 +205,19 @@ class TacticalASICDashboard:
             
             if "[HAMMER: ON]" in line: self.hammer_mode = True
             elif "[HAMMER: OFF]" in line: self.hammer_mode = False
+            elif "[VAULT] LOCKED" in line: self.vault_locked = True
+            elif "[VAULT] UNLOCKED" in line: self.vault_locked = False
+            elif "[SWARM]" in line:
+                self.swarm_syncs += 1
+                self.alerts.append([ts, "[cyan]L5[/cyan]", "[bold cyan]Swarm Sync: Peer Vector[/bold cyan]"])
+                # Light up a random area in tensor map
+                idx = random.randint(0, 127)
+                self.tensor_heatmap[idx] = 10
+            elif "[IPS]" in line:
+                self.stats["L2_EDR"] += 1
+                match = re.search(r'Terminated Process (\d+)', line)
+                pid = match.group(1) if match else "UNKNOWN"
+                self.alerts.append([ts, "[bold red]IPS[/bold red]", f"[bold reverse red] TERMINATED PID {pid} [/bold reverse red]"])
             elif "[CRYPTO_STATS]" in line:
                 try:
                     parts = line.split("STATS] ")[1].split("|")
@@ -191,6 +234,9 @@ class TacticalASICDashboard:
             elif "[ASIC EVOLVE]" in line:
                 self.stats["Tensors_Optimized"] += 1
                 self.alerts.append([ts, "[magenta]L5[/magenta]", "[bold yellow]Tensor DB Evolved[/bold yellow]"])
+                # Light up map
+                idx = random.randint(0, 127)
+                self.tensor_heatmap[idx] = 10
             elif "[ASIC L6 CRYPTO]" in line:
                 msg = line.split("CRYPTO] ")[-1].strip()
                 if len(msg) > 35: msg = msg[:32] + "..."
@@ -200,7 +246,10 @@ class TacticalASICDashboard:
                 self.jamming_active = True
                 threading.Thread(target=self.trigger_bios_beep, daemon=True).start()
             elif "[ASIC PRIV ALERT]" in line: self.alerts.append([ts, "[red]L2[/red]", "PrivEsc Detected"])
-            elif "[ASIC VECTOR ALERT]" in line: self.alerts.append([ts, "[bold magenta]L2[/bold magenta]", "[bold reverse magenta] APT MATCH [/bold reverse magenta]"])
+            elif "[ASIC VECTOR ALERT]" in line: 
+                self.alerts.append([ts, "[bold magenta]L2[/bold magenta]", "[bold reverse magenta] APT MATCH [/bold reverse magenta]"])
+                idx = random.randint(0, 127)
+                self.tensor_heatmap[idx] = 10
             elif "[ASIC L3 ALERT]" in line: self.alerts.append([ts, "[yellow]L3[/yellow]", "Cache Anomaly"])
 
     def handle_input(self):
@@ -211,8 +260,13 @@ class TacticalASICDashboard:
             while not self.stop_event.is_set():
                 if select.select([sys.stdin], [], [], 0.1)[0]:
                     key = sys.stdin.read(1)
-                    if key == 'h' and self.backend_process:
-                        os.kill(self.backend_process.pid, signal.SIGUSR1)
+                    if not self.backend_process: continue
+                    
+                    if key == 'h':
+                        os.killpg(os.getpgid(self.backend_process.pid), signal.SIGUSR1)
+                    elif key == 'v':
+                        os.killpg(os.getpgid(self.backend_process.pid), signal.SIGUSR2)
+
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
@@ -241,13 +295,17 @@ class TacticalASICDashboard:
                     layout["traffic_stream"].update(self.get_traffic_panel())
                     layout["me_stream"].update(self.get_me_panel())
                     layout["intel_feed"].update(self.get_intel_panel())
+                    layout["tensor_map"].update(self.get_tensor_map())
                     layout["layer_status"].update(self.get_layer_status())
                     
                     iface_str = ",".join(self.interfaces)
-                    layout["footer"].update(Panel(Text(f"IFACES: {iface_str} | [h] TOGGLE HAMMER", justify="center", style="dim")))
+                    footer_msg = f"IFACES: {iface_str} | [h] TOGGLE HAMMER | [v] TOGGLE VAULT"
+                    layout["footer"].update(Panel(Text(footer_msg, justify="center", style="dim")))
                     time.sleep(0.1)
             except KeyboardInterrupt:
                 self.stop_event.set()
+                if self.backend_process:
+                    os.killpg(os.getpgid(self.backend_process.pid), signal.SIGTERM)
 
 if __name__ == "__main__":
     if len(sys.argv) < 2: sys.exit(1)
