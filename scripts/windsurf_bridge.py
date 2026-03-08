@@ -2,52 +2,19 @@
 import os
 import sys
 import time
-import numpy as np
 import hashlib
 import re
+import struct
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# ASIC Shared Memory Path
+# ASIC Shared Memory Path (Named Pipe)
 ASIC_FEED = "/tmp/asic_code_feed"
-
-class SemanticCodeEncoder:
-    """Real-world Locality Sensitive Hashing (SimHash) for Code"""
-    def __init__(self, dims=160):
-        self.dims = dims
-
-    def encode(self, text):
-        # 1. Clean and tokenize code (remove comments/whitespace)
-        text = re.sub(r'#.*|//.*|/\*[\s\S]*?\*/', '', text)
-        tokens = re.findall(r'\w+', text.lower())
-        
-        if not tokens:
-            return np.zeros(self.dims, dtype=np.float32)
-
-        # 2. Project tokens into bit-space
-        v = np.zeros(self.dims)
-        for token in tokens:
-            # Deterministic hash of the token
-            h = hashlib.sha256(token.encode()).digest()
-            # Convert bytes to bit array
-            bits = np.unpackbits(np.frombuffer(h, dtype=np.uint8))
-            
-            for i in range(min(len(bits), self.dims)):
-                if bits[i]:
-                    v[i] += 1
-                else:
-                    v[i] -= 1
-        
-        # 3. Create the SimHash vector
-        # Normalizing to range [0, 1] for the QIHSE engine
-        fingerprint = (v > 0).astype(np.float32)
-        return fingerprint
 
 class CodeIndexer(FileSystemEventHandler):
     def __init__(self, project_path):
         self.project_path = project_path
-        self.encoder = SemanticCodeEncoder(dims=160)
-        print(f"[ASIC-WINDSURF] Real Semantic Core Active. Monitoring: {project_path}")
+        print(f"[ASIC-WINDSURF] Code Feeder Active. Offloading to Monolith ASIC.")
 
     def on_modified(self, event):
         if event.is_directory or not event.src_path.endswith(('.py', '.c', '.h', '.js', '.ts')):
@@ -59,24 +26,44 @@ class CodeIndexer(FileSystemEventHandler):
             with open(file_path, 'r') as f:
                 content = f.read()
             
-            # REAL FEATURE EXTRACTION (Deterministic LSH)
-            vector = self.encoder.encode(content)
+            # Clean and tokenize
+            text = re.sub(r'#.*|//.*|/\*[\s\S]*?\*/', '', content)
+            tokens = re.findall(r'\w+', text.lower())
             
-            # Metadata for the packet: [PID(4) | UID(4) | TYPE(4) | VECTOR(160*4)]
-            # We'll use a simplified binary format for the ASIC pipe
-            with open(ASIC_FEED, "ab") as f:
-                f.write(vector.tobytes())
+            if not tokens:
+                return
+
+            # Deterministic Token Hashing (Fast)
+            # We send raw uint32 hashes to the ASIC context core
+            token_hashes = []
+            for token in tokens:
+                h = int(hashlib.md5(token.encode()).hexdigest()[:8], 16)
+                token_hashes.append(h)
             
-            print(f"[ASIC-OFFLOAD] Indexed real semantic vector for: {os.path.basename(file_path)}")
+            # Pack as binary uint32 array
+            # MAX_PAYLOAD is 256 bytes = 64 tokens
+            payload = struct.pack(f"{min(len(token_hashes), 64)}I", *token_hashes[:64])
+            
+            # Offload to ASIC via Named Pipe
+            try:
+                # Open non-blocking to avoid hanging if monolith is not reading
+                fd = os.open(ASIC_FEED, os.O_WRONLY | os.O_NONBLOCK)
+                os.write(fd, payload)
+                os.close(fd)
+                print(f"[ASIC-OFFLOAD] Dispatched {len(token_hashes)} tokens for: {os.path.basename(file_path)}")
+            except OSError:
+                # Pipe not ready or full
+                pass
                 
         except Exception as e:
-            print(f"Error indexing {file_path}: {e}")
+            print(f"Error feeding {file_path}: {e}")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit(1)
+        path = "."
+    else:
+        path = sys.argv[1]
         
-    path = sys.argv[1]
     event_handler = CodeIndexer(path)
     observer = Observer()
     observer.schedule(event_handler, path, recursive=True)
