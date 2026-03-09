@@ -1,9 +1,9 @@
 
-# QIHSE SECURITY ASIC & ASI COMMAND CENTER (v2.3-MONOLITH)
-**Hardware-Accelerated Defense & AI Development Bodyguard**
+# QIHSE SECURITY ASIC & ASI COMMAND CENTER (v3.2-MONOLITH)
+**Hardware-Accelerated Defense & AI Autonomous Research Bodyguard**
 
 ## 1. Executive Summary
-The **QIHSE Security ASIC** transforms legacy NVIDIA GPUs into dedicated security co-processors. Version 2.3 introduces a **Unified C++ Monolith**, moving beyond simple monitoring into active, hardware-level intervention. The system now utilizes a **Dual-GPU architecture** to provide zero-latency security enforcement while simultaneously accelerating IDE workflows for **Windsurf Next**.
+The **QIHSE Security ASIC** transforms legacy NVIDIA GPUs into dedicated security co-processors. Version 3.2 introduces a **High-Fidelity Vector GUI** and a split-architecture model, separating root-level sensor enforcement from user-level visualization. The system now integrates with **Karpathy's Autoresearch** to provide hardware-accelerated semantic ranking and data preparation.
 
 ## 2. Multi-Layer Defense Matrix (L1 - L6)
 The system monitors and protects the entire silicon-to-signal spectrum:
@@ -14,60 +14,50 @@ The system monitors and protects the entire silicon-to-signal spectrum:
 | **L2** | **EDR/CFP** | eBPF Syscall Hooks | **QIHSE Vector Search** | **Automated Process Termination** |
 | **L2+** | **CODE** | inotify C-Bridge | **Context Core** | **AI Intent Verification** & Secret Scanning |
 | **L3** | **HARDWARE**| PMC Cache Sensor | **Entropy Analyzer** | Side-Channel (Spectre) Mitigation |
-| **L3+** | **ME/CSME** | HECI Sentry | **Sentry Core** | ME Payload Interception |
-| **L4** | **SYSTEM** | eBPF RAM Guard | **Resource Monitor** | **RAM Starvation Protection** |
+| **L3+** | **ME/CSME** | PCI HECI Link | **Sentry Core** | **ME Payload Interception** (L3+ Sentry) |
+| **L4** | **SYSTEM** | eBPF RAM Guard | **Resource Monitor** | **Active OOM Prevention** (70% Threshold) |
 | **L5** | **SANDBOX** | eBPF Clean Room | **Sandbox Core** | **Secure Execution** of Dev Builds |
-| **L6** | **CRYPTO** | Side-Channel DPA | **Cryptanalysis Core** | Long-term Intel ME Key Extraction |
+| **L6** | **CRYPTO** | Side-Channel DPA | **Berserker Core** | Long-term Intel ME Key Extraction |
 
-## 3. Key Technical Features (v2.3)
-- **C++ Monolithic Binary**: The entire stack (OpenCL, eBPF, UI, and File Bridge) is now compiled into a single, high-performance binary, eliminating Python-driven latency.
-- **Dual-GPU Acceleration**:
-  - **GTX 560 Ti (GF110)**: Dedicated to high-speed security compute and Code Intelligence kernels.
-  - **G210 (GT218)**: Offloads tactical UI rendering and telemetry polling to preserve primary compute cycles.
-- **RAM Bodyguard**: Real-time eBPF monitoring of system memory usage. Automatically flags and throttles processes (like heavy IDE tasks) that threaten system stability.
-- **Pre-allocated Buffer Pool**: OpenCL kernels utilize a zero-allocation hot path, preventing the driver-level memory starvation that causes system reboots.
-- **Hardware-Accelerated Code Auditor**:
-  - **Secret Scanner**: GPU-parallel scanning for hardcoded AWS keys, RSA keys, and unsafe C functions.
-  - **Complexity Analysis**: Real-time "Code Entropy" calculations to flag over-engineered or unstable code.
-  - **Predictive Pre-fetching**: Semantic correlation analysis to pre-warm the VRAM cache for files you are likely to open next.
+## 3. Advanced Technical Features (v3.2)
+- **Split-Architecture GUI**: 
+  - **`asic_daemon` (Root)**: High-performance心 heart handling eBPF, OpenCL, and PCI-level ME monitoring.
+  - **`asic_gui` (User)**: High-fidelity Dear ImGui vector interface. Zero-ghosting, flicker-free rendering via **Stroboscopic Seqlock** atomic snapshots.
+- **High-Precision Telemetry Bus**: Uses a hard-aligned 64-bit memory map and high-precision delta-polling from `/proc/stat` to eliminate data jitter.
+- **Aggressive VRAM Relief**: Proactively offloads large host-side buffers (codebase indices, embeddings) into GPU VRAM when system RAM usage exceeds 70%.
+- **Dynamic Behavioral Safe-List**: Automatically identifies and graduates safe development processes (Windsurf, Gemini) to a "Safe Tier" based on clean operational history.
+- **Dual-GPU Acceleration**: Simultaneous utilization of **GTX 560 Ti** (Compute) and **G210** (UI/Telemetry Offload).
 
-## 4. Windsurf Next Deep Integration
-The ASIC now acts as a hardware co-processor for the **Windsurf Next** IDE:
-
-### 4.1 AI Intent Verifier
-Compares your natural language instructions (Intent) against the resulting code (Implementation).
-- **Metric**: *Intent Deviation*. High scores flag code that drifts from your original instructions, potentially introducing side effects.
-- **Command**: `./asic_intent "your instruction here"`
-
-### 4.2 ASIC-Sandboxed "Secure Run"
-Enforces a "Clean Room" environment for testing your development builds.
-- **Enforcement**: eBPF hooks block all unauthorized outbound network connections and sensitive file reads (e.g., `~/.ssh/`).
-- **Command**: `./asic_secure_run ./your_binary`
+## 4. Autonomous Research Integration
+The ASIC now supports hardware-offloading for **Karpathy's Autoresearch**:
+- **Search/Ranking**: Utilizes `qihse_vector_search` for hyperparameter optimization and experiment ranking.
+- **Data Prep**: Offloads document hashing and deduplication to the **Integrity Core**.
+- **Semantic Sync**: Accelerates BPE tokenization and semantic vector bit-projection.
 
 ## 5. Tactical Dashboard
-The dashboard has been upgraded to a **Fixed 80-100 Column Rigid Layout** for maximum stability across all terminal types.
-- **System Vitals**: Dual-GPU load bars, high-fidelity RAM usage, and CPU load profiles.
-- **Code Intel Feed**: Displays real-time Complexity scores, Secret detection counts, and the Predicted Next File.
-- **Security Log**: A multi-colored stream of EDR, EDGE, CFP, and Sandbox events.
+The v3.2 interface provides a "Medical/Automotive" grade tactical overview:
+- **Modular Viewports**: Three primary domains (System Core, ASIC Performance, Code Intelligence).
+- **Neon-Glow Vector Borders**: High-visibility status indicators for EDR and ME Sentry.
+- **Real-Time Sparklines**: High-resolution history for CPU, RAM, and GPU compute loads.
 
 ## 6. CLI Tools & IPC
 | Tool | Function | IPC Path |
 | :--- | :--- | :--- |
-| **asic_monolith** | The core co-processor engine and UI. | N/A |
+| **asic_daemon** | Root-level co-processor driver. | `/asic_gui_v3_shm` |
+| **asic_gui** | High-fidelity tactical dashboard. | `/asic_gui_v3_shm` |
 | **asic_intent** | Dispatches NLP instructions to the AI Verifier. | `/tmp/asic_intent_pipe` |
 | **asic_secure_run** | Wraps a process in the ASIC eBPF Sandbox. | `/tmp/asic_sandbox_pipe` |
-| **asic_search** | (External) Trigger GPU parallel grep. | `/tmp/asic_search_pipe` |
 
 ## 7. Quick Start
 ```bash
-# 1. Generate local kernel headers
-sudo /usr/sbin/bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+# 1. Build the v3.2 Monolith
+make clean && make -j$(nproc)
 
-# 2. Build the Monolith
-make -j$(nproc)
+# 2. Launch the Driver (Root)
+sudo ./asic_daemon enp4s0 wlp2s0
 
-# 3. Launch Tactical Command Center (Monitoring WiFi & Ethernet)
-sudo ./asic_monolith enp4s0 wlp2s0
+# 3. Launch the Tactical Command Center (User)
+./asic_gui
 ```
 
 ## 8. License
@@ -75,4 +65,4 @@ Licensed under the **Hostile Architecture Public License (HAPL) v1.0**.
 Commercial exploitation and AI training on this codebase are strictly prohibited.
 
 ---
-**Developed by SWORDIntel / DSMIL System on a whim,the implications for adapting old computer parts especially given currrent pricesx are endless*
+**Developed by SWORDIntel / DSMIL System**
