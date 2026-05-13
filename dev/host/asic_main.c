@@ -103,7 +103,9 @@ struct policy_summary {
 
 struct process_context {
     uint32_t ppid;
+    uint32_t gppid;
     char parent_comm[16];
+    char grandparent_comm[16];
     char exe[EDR_MAX_TARGET];
     char cwd[EDR_MAX_TARGET];
     char cmdline[MAX_CMDLINE];
@@ -115,6 +117,8 @@ struct process_context {
     long long exe_mtime;
     bool exe_deleted;
     bool exe_writable_path;
+    bool has_tty;
+    bool interactive_session;
 };
 
 struct dedup_entry {
@@ -1021,6 +1025,72 @@ static uint32_t read_proc_ppid(uint32_t pid) {
     return ppid;
 }
 
+static bool read_proc_tty_nr(uint32_t pid, int *tty_nr) {
+    char path[64];
+    char line[1024];
+    snprintf(path, sizeof(path), "/proc/%u/stat", pid);
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return false;
+    }
+
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+
+    char *comm_end = strrchr(line, ')');
+    if (!comm_end) {
+        return false;
+    }
+
+    char state = '\0';
+    unsigned int ppid = 0;
+    unsigned int pgrp = 0;
+    unsigned int session = 0;
+    int parsed_tty_nr = 0;
+    if (sscanf(comm_end + 1, " %c %u %u %u %d",
+               &state, &ppid, &pgrp, &session, &parsed_tty_nr) != 5) {
+        return false;
+    }
+
+    (void)state;
+    (void)ppid;
+    (void)pgrp;
+    (void)session;
+    *tty_nr = parsed_tty_nr;
+    return true;
+}
+
+static bool fd_link_is_tty(uint32_t pid, int fd) {
+    char path[64];
+    char target[EDR_MAX_TARGET];
+    snprintf(path, sizeof(path), "/proc/%u/fd/%d", pid, fd);
+
+    ssize_t n = readlink(path, target, sizeof(target) - 1);
+    if (n < 0) {
+        return false;
+    }
+    target[n] = '\0';
+
+    return has_path_prefix(target, "/dev/tty") ||
+           has_path_prefix(target, "/dev/pts/") ||
+           strcmp(target, "/dev/console") == 0;
+}
+
+static bool process_has_tty(uint32_t pid) {
+    int tty_nr = 0;
+    if (read_proc_tty_nr(pid, &tty_nr) && tty_nr > 0) {
+        return true;
+    }
+
+    return fd_link_is_tty(pid, 0) ||
+           fd_link_is_tty(pid, 1) ||
+           fd_link_is_tty(pid, 2);
+}
+
 static void read_proc_cmdline(uint32_t pid, char *dst, size_t dst_size) {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%u/cmdline", pid);
@@ -1052,7 +1122,11 @@ static void read_proc_cmdline(uint32_t pid, char *dst, size_t dst_size) {
 static void enrich_process(uint32_t pid, struct process_context *proc) {
     memset(proc, 0, sizeof(*proc));
     proc->ppid = read_proc_ppid(pid);
+    proc->gppid = read_proc_ppid(proc->ppid);
     read_proc_comm(proc->ppid, proc->parent_comm, sizeof(proc->parent_comm));
+    read_proc_comm(proc->gppid, proc->grandparent_comm, sizeof(proc->grandparent_comm));
+    proc->has_tty = process_has_tty(pid);
+    proc->interactive_session = proc->has_tty;
     read_proc_link(pid, "exe", proc->exe, sizeof(proc->exe));
     proc->exe_deleted = has_deleted_suffix(proc->exe);
     proc->exe_writable_path = is_writable_exe_path(proc->exe);
@@ -1377,28 +1451,34 @@ static void format_event(const struct edr_event *e, const struct process_context
                          char *line, size_t line_size) {
     if (e->type == EDR_EVENT_EXEC) {
         snprintf(line, line_size,
-                 "pid=%u ppid=%u parent=%s uid=%u comm=%s event=exec target=%.120s exe=%.120s",
-                 e->pid, proc->ppid, proc->parent_comm, e->uid, e->comm, e->target, proc->exe);
+                 "pid=%u ppid=%u parent=%s gppid=%u grandparent=%s uid=%u comm=%s event=exec target=%.120s exe=%.120s",
+                 e->pid, proc->ppid, proc->parent_comm, proc->gppid, proc->grandparent_comm,
+                 e->uid, e->comm, e->target, proc->exe);
     } else if (e->type == EDR_EVENT_MPROTECT || e->type == EDR_EVENT_MMAP) {
         snprintf(line, line_size,
-                 "pid=%u ppid=%u parent=%s uid=%u comm=%s event=%s prot=0x%x flags=0x%x exe=%.120s",
-                 e->pid, proc->ppid, proc->parent_comm, e->uid, e->comm,
+                 "pid=%u ppid=%u parent=%s gppid=%u grandparent=%s uid=%u comm=%s event=%s prot=0x%x flags=0x%x exe=%.120s",
+                 e->pid, proc->ppid, proc->parent_comm, proc->gppid, proc->grandparent_comm,
+                 e->uid, e->comm,
                  event_name(e->type), e->prot, e->flags, proc->exe);
     } else if (e->type == EDR_EVENT_OPENAT) {
         snprintf(line, line_size,
-                 "pid=%u ppid=%u parent=%s uid=%u comm=%s event=openat flags=0x%x target=%.120s exe=%.120s",
-                 e->pid, proc->ppid, proc->parent_comm, e->uid, e->comm,
+                 "pid=%u ppid=%u parent=%s gppid=%u grandparent=%s uid=%u comm=%s event=openat flags=0x%x target=%.120s exe=%.120s",
+                 e->pid, proc->ppid, proc->parent_comm, proc->gppid, proc->grandparent_comm,
+                 e->uid, e->comm,
                  e->flags, e->target, proc->exe);
     } else if (e->type == EDR_EVENT_CONNECT) {
         char addr[INET6_ADDRSTRLEN] = "";
         format_net_addr(e, addr, sizeof(addr));
         snprintf(line, line_size,
-                 "pid=%u ppid=%u parent=%s uid=%u comm=%s event=connect dst=%s:%u exe=%.120s",
-                 e->pid, proc->ppid, proc->parent_comm, e->uid, e->comm,
+                 "pid=%u ppid=%u parent=%s gppid=%u grandparent=%s uid=%u comm=%s event=connect dst=%s:%u exe=%.120s",
+                 e->pid, proc->ppid, proc->parent_comm, proc->gppid, proc->grandparent_comm,
+                 e->uid, e->comm,
                  addr, event_dst_port(e), proc->exe);
     } else {
-        snprintf(line, line_size, "pid=%u ppid=%u parent=%s uid=%u comm=%s event=unknown type=%u",
-                 e->pid, proc->ppid, proc->parent_comm, e->uid, e->comm, e->type);
+        snprintf(line, line_size,
+                 "pid=%u ppid=%u parent=%s gppid=%u grandparent=%s uid=%u comm=%s event=unknown type=%u",
+                 e->pid, proc->ppid, proc->parent_comm, proc->gppid, proc->grandparent_comm,
+                 e->uid, e->comm, e->type);
     }
 }
 
@@ -1425,12 +1505,14 @@ static void write_jsonl(FILE *out, const struct edr_event *e,
 
     fprintf(out,
             "{\"timestamp_ns\":%llu,\"event\":\"%s\",\"pid\":%u,\"tid\":%u,"
-            "\"ppid\":%u,\"uid\":%u,\"gid\":%u,\"comm\":\"",
+            "\"ppid\":%u,\"gppid\":%u,\"uid\":%u,\"gid\":%u,\"comm\":\"",
             (unsigned long long)e->timestamp_ns, event_name(e->type), e->pid, e->tid,
-            proc->ppid, e->uid, e->gid);
+            proc->ppid, proc->gppid, e->uid, e->gid);
     json_escape(out, e->comm);
     fprintf(out, "\",\"parent_comm\":\"");
     json_escape(out, proc->parent_comm);
+    fprintf(out, "\",\"grandparent_comm\":\"");
+    json_escape(out, proc->grandparent_comm);
     fprintf(out, "\",\"exe\":\"");
     json_escape(out, proc->exe);
     fprintf(out, "\",\"cwd\":\"");
@@ -1458,12 +1540,15 @@ static void write_jsonl(FILE *out, const struct edr_event *e,
             ",\"dst_port\":%u,\"prot\":%u,\"flags\":%u,"
             "\"exe_dev\":%llu,\"exe_inode\":%llu,\"exe_mode\":%u,\"exe_uid\":%u,\"exe_gid\":%u,"
             "\"exe_mtime\":%lld,\"exe_deleted\":%s,\"exe_writable_path\":%s,"
+            "\"has_tty\":%s,\"interactive_session\":%s,"
             "\"severity\":%d,\"repeat_count\":%u,\"rule_id\":\"",
             e->type == EDR_EVENT_CONNECT ? event_dst_port(e) : 0,
             e->prot, e->flags,
             proc->exe_dev, proc->exe_inode, proc->exe_mode, proc->exe_uid, proc->exe_gid,
             proc->exe_mtime, proc->exe_deleted ? "true" : "false",
             proc->exe_writable_path ? "true" : "false",
+            proc->has_tty ? "true" : "false",
+            proc->interactive_session ? "true" : "false",
             finding->severity, repeat_count);
     json_escape(out, finding->rule_id);
     fprintf(out, "\",\"reason\":\"");

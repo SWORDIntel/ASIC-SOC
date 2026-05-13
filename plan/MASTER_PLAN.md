@@ -29,6 +29,7 @@ Turn the repository into a focused endpoint detection and response agent instead
 21. Add ID-based policy controls with `disable_rule_id=<rule_id>` and `rule_severity=<rule_id>,<severity>`, including executable-memory rule IDs.
 22. Add EDR rule profiles with `baseline`, `server`, `developer-workstation`, and `high-signal` built-in postures.
 23. Add network destination classification in JSONL findings for destination scope, private-address, and loopback context.
+24. Add lineage and TTY enrichment as the first behavioral-flow foundation, including JSONL `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`.
 
 ## Phase 1: Detection Quality
 
@@ -133,7 +134,7 @@ Objective: prevent regressions while the sensor grows.
 
 ## Next Implementation Slice
 
-1. Add lineage and TTY enrichment as the first behavioral-flow foundation.
-2. Capture parent and grandparent command names in findings.
-3. Add `has_tty` and `interactive_session` JSONL fields where available.
-4. Prepare bounded process-tree flow state for shell/downloader/public-network detections.
+1. Add bounded process-tree flow state for shell/downloader/public-network detections.
+2. Track recent process execution and public network signals by process tree.
+3. Expire flow state by a short configurable window and keep per-tree counters bounded.
+4. Use the completed lineage and TTY fields as context for initial compiled flow detections.

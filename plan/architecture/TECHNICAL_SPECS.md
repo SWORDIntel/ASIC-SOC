@@ -15,7 +15,7 @@
 ## Data Model
 
 - process identity: pid, tid, uid, gid, comm
-- process context: parent pid, parent comm, executable path, cwd, command line
+- process context: parent pid, parent comm, grandparent pid (`gppid`), grandparent command (`grandparent_comm`), executable path, cwd, command line, controlling-terminal marker (`has_tty`), and interactive-session marker (`interactive_session`)
 - executable provenance: device, inode, mode, owner uid/gid, mtime, deleted executable marker, and writable-path classification
 - exec events: filename path
 - memory events: protection flags and mmap flags
@@ -29,7 +29,7 @@
 - policy disables: built-in/default detection rules can be removed with `disable_<rule_key>=value` or `disable_rule_id=<rule_id>`
 - policy summary: startup output reports active profile, rule counts, active severity floor, and deduplication window
 - deduplication: repeated findings are suppressed and summarized with `repeat_count`; the suppression window is controlled by `dedup_window_seconds`
-- behavioral flow roadmap: `plan/architecture/BEHAVIORAL_FLOWS.md` defines the planned process-tree correlation model for suspicious logic flows, including no-TTY or idle-user public transfer activity
+- behavioral flow foundation: lineage and TTY/session context are emitted on JSONL findings through `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`; `plan/architecture/BEHAVIORAL_FLOWS.md` defines the planned process-tree correlation model for suspicious logic flows, including no-TTY or idle-user public transfer activity
 
 ## Rule IDs
 
@@ -38,6 +38,6 @@ Executable-memory detections use fixed IDs: `mem.exec_mprotect`, `mem.rwx_mprote
 
 ## Near-Term Work
 
-1. Add lineage and TTY enrichment as the first behavioral-flow foundation.
-2. Add bounded process-tree flow state.
+1. Add bounded process-tree flow state for shell/downloader/public-network detections.
+2. Add initial compiled behavioral flow detections using lineage, TTY/session, and network destination context.
 3. Add Debian packaging metadata.

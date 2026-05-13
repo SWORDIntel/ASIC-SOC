@@ -175,6 +175,71 @@ for line_no, record in findings:
 PY
 }
 
+assert_finding_lineage_session_fields() {
+    local file="$1"
+
+    python3 - "$file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+required_fields = (
+    "gppid",
+    "grandparent_comm",
+    "has_tty",
+    "interactive_session",
+)
+findings = []
+
+with open(path, "r", encoding="utf-8") as lines:
+    for line_no, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(f"invalid JSONL on line {line_no}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if "severity" in record and "reason" in record:
+            findings.append((line_no, record))
+
+if not findings:
+    print("no finding JSONL records found", file=sys.stderr)
+    sys.exit(1)
+
+for line_no, record in findings:
+    missing = [field for field in required_fields if field not in record]
+    if missing:
+        print(
+            f"finding JSONL record on line {line_no} missing fields: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if isinstance(record["gppid"], bool) or not isinstance(record["gppid"], int):
+        print(
+            f"finding JSONL record on line {line_no} has non-integer gppid",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not isinstance(record["grandparent_comm"], str):
+        print(
+            f"finding JSONL record on line {line_no} has non-string grandparent_comm",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    for field in ("has_tty", "interactive_session"):
+        if not isinstance(record[field], bool):
+            print(
+                f"finding JSONL record on line {line_no} has non-boolean {field}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+PY
+}
+
 assert_finding_rule_ids() {
     local file="$1"
 
@@ -505,6 +570,16 @@ test_runtime_jsonl_emits_exe_provenance_fields() {
     assert_finding_exe_provenance_fields "$output_file"
 }
 
+test_runtime_jsonl_emits_lineage_session_fields() {
+    local config_file output_file
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-lineage-session.XXXXXX.jsonl)"
+
+    run_agent_capture "$config_file" "$output_file"
+
+    assert_finding_lineage_session_fields "$output_file"
+}
+
 test_runtime_jsonl_emits_rule_ids() {
     local config_file output_file
     config_file="$(base_config)"
@@ -605,6 +680,7 @@ test_runtime_jsonl_emits_policy_summary
 test_runtime_jsonl_emits_policy_profile
 test_high_signal_profile_suppresses_shell_exec_defaults
 test_runtime_jsonl_emits_exe_provenance_fields
+test_runtime_jsonl_emits_lineage_session_fields
 test_runtime_jsonl_emits_rule_ids
 test_runtime_jsonl_classifies_loopback_suspicious_port
 test_critical_floor_suppresses_warnings

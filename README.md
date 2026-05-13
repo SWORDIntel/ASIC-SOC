@@ -11,6 +11,7 @@ The active roadmap lives in `plan/MASTER_PLAN.md`.
 - Console output plus optional JSONL event export
 - Userspace process enrichment from `/proc` for parent, executable, cwd, and command line
 - JSONL findings include `rule_id` plus executable provenance: device, inode, mode, owner ids, mtime, deleted executable marker, and writable-path classification
+- JSONL findings include first-stage behavioral-flow context: `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`
 - JSONL network findings include destination context fields for scope, privacy, and loopback classification
 - Deduplicated repeated findings include `repeat_count`
 - Startup policy summaries for active rule counts, severity floor, and deduplication window
@@ -95,6 +96,13 @@ Network `connect` findings include `dst_addr`, `dst_port`, and destination class
 - `dst_scope`: coarse routing scope for the destination, such as `loopback`, `private`, `public`, `link-local`, `multicast`, `unspecified`, or an empty string when unknown
 - `dst_is_private`: boolean marker for private destinations
 - `dst_is_loopback`: boolean marker for loopback destinations
+
+Findings also carry process lineage and session fields used by behavioral-flow detections:
+
+- `gppid`: grandparent process id when it can be resolved, otherwise `0`
+- `grandparent_comm`: grandparent command name when it can be resolved, otherwise an empty string
+- `has_tty`: boolean marker for whether the process appears to have a controlling terminal
+- `interactive_session`: boolean marker for whether the process appears tied to an interactive terminal session
 
 ## Install
 

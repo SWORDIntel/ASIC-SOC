@@ -14,14 +14,14 @@ The target detection model is:
 ## Core Signals
 
 1. Process lineage
-   - pid, ppid, grandparent pid
-   - parent and grandparent command names
+   - pid, ppid, grandparent pid (`gppid`)
+   - parent command name and grandparent command name (`grandparent_comm`)
    - executable path, cwd, cmdline, uid, gid
    - controlling terminal and session identifiers where available
 
 2. User activity and session context
-   - whether the process has a controlling TTY
-   - whether stdin/stdout attach to a TTY
+   - whether the process has a controlling TTY (`has_tty`)
+   - whether the process appears attached to an interactive terminal session (`interactive_session`)
    - whether the process appears service-launched or user-launched
    - optional future idle-time enrichment from logind, `/dev/input`, X11, or Wayland
 
@@ -85,6 +85,8 @@ Flow findings should keep normal finding fields and add:
 - `flow_reasons`
 - `flow_window_seconds`
 - `flow_root_pid`
+- `gppid`
+- `grandparent_comm`
 - `has_tty`
 - `interactive_session`
 - `user_idle_seconds` when available, otherwise omitted or `-1`
@@ -111,15 +113,16 @@ flow_score_critical=70
 
 ## Implementation Slices
 
-1. Lineage and TTY enrichment
+1. Lineage and TTY enrichment - complete
    - add grandparent fields
    - add TTY/session indicators
-   - emit JSONL context fields
+   - emit JSONL context fields `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`
 
-2. Flow state cache
+2. Flow state cache - next
    - track recent process, file, and network signals by process tree
    - expire state by time window
    - keep counters bounded
+   - first target: shell/downloader/public-network detections
 
 3. Initial compiled flow detections
    - shell downloader public network flow
