@@ -157,6 +157,6 @@ Later analytics:
 
 ## Near-Term Decision
 
-The next implementation slice should still be local EDR correctness: `flow.sensitive_read_then_public_net`.
+Local EDR correctness now includes `flow.sensitive_read_then_public_net`.
 
-After that, add schema metadata so QIHSE ingestion has stable host identity and replay semantics.
+The next QIHSE-enabling slice should add schema metadata so ingestion has stable host identity and replay semantics.

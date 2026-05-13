@@ -159,9 +159,11 @@ struct flow_state_entry {
     uint64_t last_seen_ns;
     bool shell_seen;
     bool transfer_exec_seen;
+    bool sensitive_read_seen;
     bool public_connect_seen;
     uint32_t shell_pid;
     uint32_t transfer_pid;
+    uint32_t sensitive_read_pid;
 };
 
 #define DEDUP_ENTRIES 128
@@ -545,6 +547,16 @@ static bool rule_id_in_string_rules(char rule_ids[][MAX_RULE_ID], size_t count,
     return false;
 }
 
+static bool rule_id_matches_family(const char *rule_id, const char *family) {
+    size_t family_len = strlen(family);
+    size_t rule_len = strlen(rule_id);
+    if (rule_len == family_len) {
+        return strcmp(rule_id, family) == 0;
+    }
+    return rule_len > family_len && strncmp(rule_id, family, family_len) == 0 &&
+           rule_id[family_len] == '.';
+}
+
 static bool known_rule_id(const char *rule_id) {
     static const char *memory_rule_ids[] = {
         "mem.rwx_mprotect",
@@ -555,6 +567,7 @@ static bool known_rule_id(const char *rule_id) {
     static const char *flow_rule_ids[] = {
         "flow.shell_downloader_public_net",
         "flow.no_tty_public_transfer_tool",
+        "flow.sensitive_read_then_public_net",
     };
 
     for (size_t i = 0; i < sizeof(memory_rule_ids) / sizeof(memory_rule_ids[0]); i++) {
@@ -1492,6 +1505,14 @@ static void flow_state_observe_event(const struct edr_event *e,
     }
 }
 
+static void flow_state_observe_sensitive_read(const struct edr_event *e,
+                                              const struct process_context *proc) {
+    struct flow_state_entry *entry = flow_state_get(flow_root_pid(e, proc), e->timestamp_ns);
+    entry->last_seen_ns = e->timestamp_ns;
+    entry->sensitive_read_seen = true;
+    entry->sensitive_read_pid = e->pid;
+}
+
 static const struct flow_state_entry *flow_state_lookup(uint32_t root_pid, uint64_t now_ns) {
     for (size_t i = 0; i < FLOW_STATE_ENTRIES; i++) {
         struct flow_state_entry *entry = &flow_state[i];
@@ -1539,6 +1560,26 @@ static bool evaluate_connect_flow(const struct edr_event *e,
     const struct flow_state_entry *entry = flow_state_lookup(root_pid, e->timestamp_ns);
     bool shell_context = process_tree_has_shell_context(e, proc) ||
                          (entry && entry->shell_seen);
+    bool sensitive_read_context = entry && entry->sensitive_read_seen;
+
+    if (sensitive_read_context) {
+        uint32_t score = 90;
+        const char *reasons = "sensitive_read,transfer_tool,public_destination";
+        if (shell_context || !proc->has_tty) {
+            score = 95;
+            reasons = "sensitive_read,transfer_tool,public_destination,suspicious_context";
+        }
+        if (make_controlled_flow_finding(
+                EDR_SEV_CRITICAL,
+                "flow.sensitive_read_then_public_net",
+                "sensitive file access followed by public network transfer",
+                score,
+                reasons,
+                root_pid,
+                finding)) {
+            return true;
+        }
+    }
 
     if (shell_context) {
         if (make_controlled_flow_finding(
@@ -1941,6 +1982,16 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         flow_state_observe_event(e, &proc);
     }
     struct edr_finding finding = evaluate_event(e, &proc);
+
+    if (e->type == EDR_EVENT_OPENAT &&
+        finding.rule_id &&
+        rule_id_matches_family(finding.rule_id, "file.sensitive_read")) {
+        if (!proc_enriched) {
+            enrich_process(e->pid, &proc);
+            proc_enriched = true;
+        }
+        flow_state_observe_sensitive_read(e, &proc);
+    }
 
     if (e->type == EDR_EVENT_EXEC) {
         g_telemetry.exec_events++;

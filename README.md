@@ -110,13 +110,13 @@ Findings also carry process lineage and session fields used by behavioral-flow d
 
 Behavioral flow findings correlate short-lived process-tree activity and add:
 
-- `flow_id`: stable flow detection id, for example `flow.shell_downloader_public_net` or `flow.no_tty_public_transfer_tool`
+- `flow_id`: stable flow detection id, for example `flow.shell_downloader_public_net`, `flow.no_tty_public_transfer_tool`, or `flow.sensitive_read_then_public_net`
 - `flow_score`: additive suspicion score for the correlated behavior
 - `flow_reasons`: compact reason list explaining the score contributors
 - `flow_window_seconds`: time window used for the bounded process-tree correlation
 - `flow_root_pid`: process-tree root pid used as the flow correlation key
 
-Initial compiled flow detections cover shell-spawned downloader or transfer-tool activity that reaches a public network destination, and no-TTY public transfer-tool activity.
+Initial compiled flow detections cover shell-spawned downloader or transfer-tool activity that reaches a public network destination, no-TTY public transfer-tool activity, and sensitive file access followed by public-network transfer behavior.
 
 ## Install
 
@@ -157,6 +157,9 @@ Stable finding `rule_id` values use the configured rule family for value-backed 
 - `mem.rwx_mprotect`
 - `mem.anon_exec_mmap`
 - `mem.rwx_mmap`
+- `flow.shell_downloader_public_net`
+- `flow.no_tty_public_transfer_tool`
+- `flow.sensitive_read_then_public_net`
 
 Supported keys:
 

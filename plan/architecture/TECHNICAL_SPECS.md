@@ -31,17 +31,17 @@
 - policy disables: built-in/default detection rules can be removed with `disable_<rule_key>=value` or `disable_rule_id=<rule_id>`
 - policy summary: startup output reports active profile, rule counts, active severity floor, and deduplication window
 - deduplication: repeated findings are suppressed and summarized with `repeat_count`; the suppression window is controlled by `dedup_window_seconds`
-- behavioral flow foundation: lineage and TTY/session context are emitted on JSONL findings through `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`; initial compiled flow detections cover shell/downloader/public-network activity and no-TTY public transfer-tool activity
+- behavioral flow foundation: lineage and TTY/session context are emitted on JSONL findings through `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`; initial compiled flow detections cover shell/downloader/public-network activity, no-TTY public transfer-tool activity, and sensitive-read then public-network transfer behavior
 
 ## Rule IDs
 
 Value-backed built-in detections use their configured family as the stable `rule_id`: `exec.suspicious_exact`, `exec.suspicious_prefix`, `file.sensitive_read`, `file.sensitive_write`, and `net.suspicious_port`.
 Executable-memory detections use fixed IDs: `mem.exec_mprotect`, `mem.rwx_mprotect`, `mem.anon_exec_mmap`, and `mem.rwx_mmap`. These memory rule IDs can be controlled with `disable_rule_id` and `rule_severity`.
-Compiled behavioral flow detections use their flow ids as stable rule ids, including `flow.shell_downloader_public_net` and `flow.no_tty_public_transfer_tool`.
+Compiled behavioral flow detections use their flow ids as stable rule ids, including `flow.shell_downloader_public_net`, `flow.no_tty_public_transfer_tool`, and `flow.sensitive_read_then_public_net`.
 
 ## Near-Term Work
 
-1. Add `flow.sensitive_read_then_public_net` using the existing bounded process-tree state.
-2. Add profile-specific behavioral flow thresholds and default enablement.
-3. Add JSONL schema and host identity metadata as the first QIHSE-enabling foundation.
+1. Add profile-specific behavioral flow thresholds and default enablement.
+2. Add JSONL schema and host identity metadata as the first QIHSE-enabling foundation.
+3. Add JSONL replay validation tooling for local spool files.
 4. Add Debian packaging metadata.

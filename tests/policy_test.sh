@@ -529,7 +529,7 @@ test_check_config_accepts_id_policy_controls() {
 test_check_config_accepts_flow_id_policy_controls() {
     local config_file
     config_file="$(base_config)"
-    printf '\ndisable_rule_id=flow.no_tty_public_transfer_tool\nrule_severity=flow.shell_downloader_public_net,critical\n' >> "$config_file"
+    printf '\ndisable_rule_id=flow.no_tty_public_transfer_tool\nrule_severity=flow.shell_downloader_public_net,critical\nrule_severity=flow.sensitive_read_then_public_net,critical\n' >> "$config_file"
 
     cd "$DEV_DIR"
     if ! ./asic_main --check-config -c "$config_file" >/dev/null; then

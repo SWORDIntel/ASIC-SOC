@@ -82,7 +82,7 @@ Suggested severity mapping:
 
 Flow findings keep normal finding fields and add:
 
-- `flow_id`: stable flow detection id; initial compiled ids include `flow.shell_downloader_public_net` and `flow.no_tty_public_transfer_tool`
+- `flow_id`: stable flow detection id; initial compiled ids include `flow.shell_downloader_public_net`, `flow.no_tty_public_transfer_tool`, and `flow.sensitive_read_then_public_net`
 - `flow_score`: additive score assigned to the correlated process-tree behavior
 - `flow_reasons`: compact list of matched score contributors, such as shell ancestry, downloader or transfer tool, no controlling TTY, and public destination
 - `flow_window_seconds`: bounded correlation window used to join process, file, lineage/session, and network signals
@@ -126,21 +126,26 @@ flow_score_critical=70
    - keep counters bounded
    - first target: shell/downloader/public-network detections
 
-3. Initial compiled flow detections - partial
+3. Initial compiled flow detections - complete for first EDR flow set
    - shell downloader public network flow
-   - no-TTY public transfer tool flow when implementation lands
-   - sensitive read then public network flow remains the next detection expansion
+   - no-TTY public transfer tool flow
+   - sensitive read then public network flow
 
 4. Flow policy controls - complete for compiled flow IDs
    - ID-based disable/severity support for compiled flows
    - profile-specific thresholds and default enablement remains future work
 
-5. Sensitive read then public network flow - next
+5. Sensitive read then public network flow - complete
    - reuse bounded process-tree state
    - correlate sensitive file reads with public network activity within the flow window
-   - raise severity when a shell-spawned transfer tool or writable-path executable is involved
+   - raise score when shell context or no-TTY context is also present
 
-6. User activity enrichment
+6. Profile-aware flow tuning
+   - profile-specific flow thresholds
+   - default flow enablement by endpoint role
+   - explicit allowlist or negative scoring hooks
+
+7. User activity enrichment
    - optional logind or input-device idle source
    - fail closed to unknown, not to benign
    - document privilege and desktop-environment constraints

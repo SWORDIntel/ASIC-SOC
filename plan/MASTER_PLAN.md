@@ -32,6 +32,7 @@ Turn the repository into a focused endpoint detection and response agent instead
 24. Add lineage and TTY enrichment as the first behavioral-flow foundation, including JSONL `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`.
 25. Add bounded process-tree flow state for short-lived behavioral correlation, including JSONL `flow_id`, `flow_score`, `flow_reasons`, `flow_window_seconds`, and `flow_root_pid`.
 26. Add ID-based disable and severity controls for compiled behavioral flow detections.
+27. Add `flow.sensitive_read_then_public_net` to correlate sensitive file access followed by public-network transfer behavior.
 
 ## Phase 1: Detection Quality
 
@@ -161,10 +162,10 @@ Objective: prevent regressions while the sensor grows.
 
 ## Next Implementation Slice
 
-1. Add `flow.sensitive_read_then_public_net` using the bounded process-tree state.
-2. Track sensitive file reads and public network connects by process tree.
-3. Score higher when the flow also includes shell/downloader context or no TTY.
-4. Keep flow findings controlled by stable rule IDs.
+1. Add JSONL schema and host identity metadata.
+2. Include `schema_version`, `agent_id`, `hostname`, `boot_id`, `agent_version`, and `config_hash`.
+3. Add JSONL type-contract tests for startup and finding records.
+4. Keep the fields local-first so QIHSE remains optional and outside the daemon hot path.
 
 ## Later Integration Slice
 
