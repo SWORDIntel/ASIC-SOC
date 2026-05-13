@@ -97,6 +97,31 @@ Objective: keep response controlled and auditable.
    - runtime health state
    - shutdown reason in JSONL
 
+## Phase 3A: Historical Analytics Backend
+
+Objective: integrate QIHSE as an optional historical brain without making local detection depend on remote storage.
+
+1. Add schema metadata for durable forwarding:
+   - `schema_version`
+   - `agent_id`
+   - `hostname`
+   - `boot_id`
+   - `config_hash`
+2. Add JSONL replay tooling:
+   - validate records
+   - replay rotated local spool files
+   - dry-run QIHSE payloads
+3. Add QIHSE forwarder:
+   - tail JSONL
+   - batch records
+   - checkpoint offsets
+   - retry with backpressure
+4. Add QIHSE analytics packs:
+   - flow detection search
+   - no-TTY public transfer views
+   - sensitive-read then public-network correlation
+   - cross-host command-line similarity
+
 ## Phase 4: Packaging
 
 Objective: make deployment reproducible.
@@ -140,3 +165,9 @@ Objective: prevent regressions while the sensor grows.
 2. Track sensitive file reads and public network connects by process tree.
 3. Score higher when the flow also includes shell/downloader context or no TTY.
 4. Keep flow findings controlled by stable rule IDs.
+
+## Later Integration Slice
+
+1. Add JSONL schema and host identity metadata.
+2. Add a local replay tool that can later feed QIHSE.
+3. Keep QIHSE optional and outside the daemon hot path.

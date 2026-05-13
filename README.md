@@ -16,6 +16,7 @@ The active roadmap lives in `plan/MASTER_PLAN.md`.
 - JSONL network findings include destination context fields for scope, privacy, and loopback classification
 - Deduplicated repeated findings include `repeat_count`
 - Startup policy summaries for active rule counts, severity floor, and deduplication window
+- QIHSE is planned as an optional historical analytics backend fed from JSONL, not as a required inline detection dependency
 
 ## What was removed
 
@@ -24,6 +25,8 @@ The active roadmap lives in `plan/MASTER_PLAN.md`.
 - Crypto/key-extraction experiments
 - Offensive simulation scripts
 - Tensor-db and QIHSE branding from the main build path
+
+QIHSE can return as an optional backend integration after the local EDR event contract stabilizes. The current plan keeps detection and response-critical state local, then forwards JSONL history into QIHSE for long-term search, baselining, and cross-host correlation.
 
 ## Build
 

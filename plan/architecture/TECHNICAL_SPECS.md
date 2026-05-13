@@ -24,6 +24,7 @@
 - network destination classification: JSONL `connect` findings expose `dst_scope`, `dst_is_private`, and `dst_is_loopback`; loopback destinations are local-only, private destinations cover RFC1918 IPv4 and unique-local IPv6 ranges, public destinations are externally routable, and unknown/unclassified values use an empty scope string
 - alerts: timestamp, source, message, severity, stable `rule_id`
 - behavioral flow findings: normal finding fields plus `flow_id`, `flow_score`, `flow_reasons`, `flow_window_seconds`, and `flow_root_pid`; flow findings are produced from bounded process-tree state that correlates recent exec, file, lineage/session, and network signals
+- QIHSE integration boundary: local JSONL remains the stable event contract; QIHSE is planned as an optional forwarder/importer target for historical analytics, replay, and cross-host correlation, not as inline detection storage
 - policy profile: `profile=<baseline|server|developer-workstation|high-signal>` selects built-in/default rule posture
 - policy threshold: normal-mode output is controlled by `min_severity`
 - policy overrides: detection rules can set per-rule severity with `key=value,severity`; built-in/default rules can also use `rule_severity=<rule_id>,<severity>`
@@ -42,4 +43,5 @@ Compiled behavioral flow detections use their flow ids as stable rule ids, inclu
 
 1. Add `flow.sensitive_read_then_public_net` using the existing bounded process-tree state.
 2. Add profile-specific behavioral flow thresholds and default enablement.
-3. Add Debian packaging metadata.
+3. Add JSONL schema and host identity metadata as the first QIHSE-enabling foundation.
+4. Add Debian packaging metadata.
