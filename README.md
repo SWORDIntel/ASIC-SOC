@@ -11,6 +11,7 @@ The active roadmap lives in `plan/MASTER_PLAN.md`.
 - Console output plus optional JSONL event export
 - Userspace process enrichment from `/proc` for parent, executable, cwd, and command line
 - JSONL findings include `rule_id` plus executable provenance: device, inode, mode, owner ids, mtime, deleted executable marker, and writable-path classification
+- JSONL network findings include destination context fields for scope, privacy, and loopback classification
 - Deduplicated repeated findings include `repeat_count`
 - Startup policy summaries for active rule counts, severity floor, and deduplication window
 
@@ -88,6 +89,12 @@ sudo ./asic_main --bpf asic_sensor.bpf.o -c ../config/rules.conf -o /var/log/asi
 Startup prints a policy summary to the console. When `-o` is used, the same startup policy state is also written as a JSONL summary record before findings.
 
 Use `--quiet` with `-o` when running under systemd. Add `--all-events` only when collecting raw telemetry; it can produce a lot of data.
+
+Network `connect` findings include `dst_addr`, `dst_port`, and destination classification fields:
+
+- `dst_scope`: coarse routing scope for the destination, such as `loopback`, `private`, `public`, `link-local`, `multicast`, `unspecified`, or an empty string when unknown
+- `dst_is_private`: boolean marker for private destinations
+- `dst_is_loopback`: boolean marker for loopback destinations
 
 ## Install
 

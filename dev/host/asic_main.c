@@ -1158,6 +1158,111 @@ static uint16_t event_dst_port(const struct edr_event *e) {
     return ntohs(e->net_port);
 }
 
+struct net_classification {
+    const char *scope;
+    bool is_private;
+    bool is_loopback;
+};
+
+static const char *classify_ipv4_addr(uint32_t addr_be, bool *is_private,
+                                      bool *is_loopback) {
+    uint32_t addr = ntohl(addr_be);
+    uint8_t first = (uint8_t)(addr >> 24);
+    uint8_t second = (uint8_t)(addr >> 16);
+
+    *is_private = first == 10 ||
+                  (first == 172 && second >= 16 && second <= 31) ||
+                  (first == 192 && second == 168);
+    *is_loopback = first == 127;
+
+    if (first == 0) {
+        return "unspecified";
+    }
+    if (*is_loopback) {
+        return "loopback";
+    }
+    if (*is_private) {
+        return "private";
+    }
+    if (first == 169 && second == 254) {
+        return "link-local";
+    }
+    if (first >= 224 && first <= 239) {
+        return "multicast";
+    }
+
+    return "public";
+}
+
+static bool ipv6_is_unspecified(const uint8_t addr[16]) {
+    for (size_t i = 0; i < 16; i++) {
+        if (addr[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ipv6_is_loopback(const uint8_t addr[16]) {
+    for (size_t i = 0; i < 15; i++) {
+        if (addr[i] != 0) {
+            return false;
+        }
+    }
+    return addr[15] == 1;
+}
+
+static bool ipv6_is_v4_mapped(const uint8_t addr[16], uint32_t *v4_addr) {
+    static const uint8_t prefix[12] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff,
+    };
+
+    if (memcmp(addr, prefix, sizeof(prefix)) != 0) {
+        return false;
+    }
+
+    memcpy(v4_addr, &addr[12], sizeof(*v4_addr));
+    return true;
+}
+
+static struct net_classification classify_net_destination(const struct edr_event *e) {
+    struct net_classification classification = {
+        .scope = "",
+        .is_private = false,
+        .is_loopback = false,
+    };
+
+    if (e->net_family == AF_INET) {
+        classification.scope = classify_ipv4_addr(e->net_addr_v4,
+                                                  &classification.is_private,
+                                                  &classification.is_loopback);
+    } else if (e->net_family == AF_INET6) {
+        uint32_t mapped_v4 = 0;
+
+        if (ipv6_is_v4_mapped(e->net_addr_v6, &mapped_v4)) {
+            classification.scope = classify_ipv4_addr(mapped_v4,
+                                                      &classification.is_private,
+                                                      &classification.is_loopback);
+        } else if (ipv6_is_unspecified(e->net_addr_v6)) {
+            classification.scope = "unspecified";
+        } else if (ipv6_is_loopback(e->net_addr_v6)) {
+            classification.scope = "loopback";
+            classification.is_loopback = true;
+        } else if ((e->net_addr_v6[0] & 0xfe) == 0xfc) {
+            classification.scope = "private";
+            classification.is_private = true;
+        } else if (e->net_addr_v6[0] == 0xfe && (e->net_addr_v6[1] & 0xc0) == 0x80) {
+            classification.scope = "link-local";
+        } else if (e->net_addr_v6[0] == 0xff) {
+            classification.scope = "multicast";
+        } else {
+            classification.scope = "public";
+        }
+    }
+
+    return classification;
+}
+
 static bool is_suspicious_port(uint16_t port, enum edr_severity *severity,
                                const char **rule_id) {
     for (size_t i = rules.suspicious_port_count; i > 0; i--) {
@@ -1340,8 +1445,17 @@ static void write_jsonl(FILE *out, const struct edr_event *e,
     }
     fprintf(out, "\",\"dst_addr\":\"");
     json_escape(out, dst_addr);
+    fprintf(out, "\"");
+    if (e->type == EDR_EVENT_CONNECT) {
+        struct net_classification dst = classify_net_destination(e);
+        fprintf(out, ",\"dst_scope\":\"");
+        json_escape(out, dst.scope);
+        fprintf(out, "\",\"dst_is_private\":%s,\"dst_is_loopback\":%s",
+                dst.is_private ? "true" : "false",
+                dst.is_loopback ? "true" : "false");
+    }
     fprintf(out,
-            "\",\"dst_port\":%u,\"prot\":%u,\"flags\":%u,"
+            ",\"dst_port\":%u,\"prot\":%u,\"flags\":%u,"
             "\"exe_dev\":%llu,\"exe_inode\":%llu,\"exe_mode\":%u,\"exe_uid\":%u,\"exe_gid\":%u,"
             "\"exe_mtime\":%lld,\"exe_deleted\":%s,\"exe_writable_path\":%s,"
             "\"severity\":%d,\"repeat_count\":%u,\"rule_id\":\"",

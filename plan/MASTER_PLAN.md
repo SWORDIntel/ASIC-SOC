@@ -28,6 +28,7 @@ Turn the repository into a focused endpoint detection and response agent instead
 20. Add stable `rule_id` values to JSONL findings for built-in process, memory, file, and network detections.
 21. Add ID-based policy controls with `disable_rule_id=<rule_id>` and `rule_severity=<rule_id>,<severity>`, including executable-memory rule IDs.
 22. Add EDR rule profiles with `baseline`, `server`, `developer-workstation`, and `high-signal` built-in postures.
+23. Add network destination classification in JSONL findings for destination scope, private-address, and loopback context.
 
 ## Phase 1: Detection Quality
 
@@ -41,10 +42,10 @@ Objective: improve signal quality without expanding the agent into non-EDR domai
    - distinguish anonymous executable memory from file-backed executable mappings
    - classify RWX mappings as critical
    - allow per-process JIT exceptions from rules
-3. Add network context refinements:
-   - loopback versus external destination classification
-   - private versus public destination classification
-   - suspicious destination port groups
+3. Add additional network rule grouping:
+   - named suspicious destination port groups
+   - profile-specific network group defaults
+   - per-group severity overrides
 
 ## Phase 2: Policy Model
 
@@ -124,6 +125,7 @@ Objective: prevent regressions while the sensor grows.
 
 ## Next Implementation Slice
 
-1. Add network context refinements.
-2. Classify loopback, private, and public destinations in JSONL findings.
-3. Add suspicious destination port groups.
+1. Add process lineage scoring.
+2. Capture parent and grandparent command names in findings.
+3. Add shell-spawned interpreter/download tool-chain detections.
+4. Add suspicious parent/child pair rules with stable rule IDs.

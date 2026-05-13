@@ -248,6 +248,51 @@ if port_4444_rule_ids and not all(
 PY
 }
 
+assert_suspicious_port_loopback_classification() {
+    local file="$1"
+
+    python3 - "$file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+matching_findings = []
+
+with open(path, "r", encoding="utf-8") as lines:
+    for line_no, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(f"invalid JSONL on line {line_no}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if "severity" not in record or "reason" not in record:
+            continue
+        if record.get("dst_port") == 4444:
+            matching_findings.append((line_no, record))
+
+if not matching_findings:
+    print("no suspicious-port finding for dst_port 4444 found", file=sys.stderr)
+    sys.exit(1)
+
+for _, record in matching_findings:
+    scope = record.get("dst_scope")
+    if isinstance(scope, str) and scope in ("loopback", "private"):
+        sys.exit(0)
+    if record.get("dst_is_loopback") is True or record.get("dst_is_private") is True:
+        sys.exit(0)
+
+print(
+    "suspicious-port finding for loopback 127.0.0.1 lacks loopback/private classification",
+    file=sys.stderr,
+)
+for line_no, record in matching_findings:
+    print(f"line {line_no}: {json.dumps(record, sort_keys=True)}", file=sys.stderr)
+sys.exit(1)
+PY
+}
+
 extract_finding_rule_id() {
     local file="$1"
     local selector="$2"
@@ -470,6 +515,16 @@ test_runtime_jsonl_emits_rule_ids() {
     assert_finding_rule_ids "$output_file"
 }
 
+test_runtime_jsonl_classifies_loopback_suspicious_port() {
+    local config_file output_file
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-net-context.XXXXXX.jsonl)"
+
+    run_agent_capture "$config_file" "$output_file"
+
+    assert_suspicious_port_loopback_classification "$output_file"
+}
+
 test_critical_floor_suppresses_warnings() {
     local config_file output_file
     config_file="$(base_config)"
@@ -551,6 +606,7 @@ test_runtime_jsonl_emits_policy_profile
 test_high_signal_profile_suppresses_shell_exec_defaults
 test_runtime_jsonl_emits_exe_provenance_fields
 test_runtime_jsonl_emits_rule_ids
+test_runtime_jsonl_classifies_loopback_suspicious_port
 test_critical_floor_suppresses_warnings
 test_per_rule_override_promotes_port
 test_disable_controls_suppress_selected_rules

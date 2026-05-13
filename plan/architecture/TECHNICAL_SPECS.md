@@ -20,7 +20,8 @@
 - exec events: filename path
 - memory events: protection flags and mmap flags
 - file events: open flags and target path
-- network events: destination address, destination port, and address family
+- network events: destination address, destination port, address family, destination scope, private-address marker, and loopback classification
+- network destination classification: JSONL `connect` findings expose `dst_scope`, `dst_is_private`, and `dst_is_loopback`; loopback destinations are local-only, private destinations cover RFC1918 IPv4 and unique-local IPv6 ranges, public destinations are externally routable, and unknown/unclassified values use an empty scope string
 - alerts: timestamp, source, message, severity, stable `rule_id`
 - policy profile: `profile=<baseline|server|developer-workstation|high-signal>` selects built-in/default rule posture
 - policy threshold: normal-mode output is controlled by `min_severity`
@@ -36,5 +37,5 @@ Executable-memory detections use fixed IDs: `mem.exec_mprotect`, `mem.rwx_mprote
 
 ## Near-Term Work
 
-1. Add network context refinements.
+1. Add process lineage scoring.
 2. Add Debian packaging metadata.
