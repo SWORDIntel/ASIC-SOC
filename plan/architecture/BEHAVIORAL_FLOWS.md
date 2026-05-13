@@ -60,16 +60,19 @@ Suggested severity mapping:
 1. Profile-aware flow tuning - initial implementation complete:
    `flow.no_tty_public_transfer_tool` is warning in `baseline`, critical in `server` and `high-signal`, and informational in `developer-workstation`; explicit `rule_severity` still overrides defaults.
 
-2. Negative scoring and allowlists:
-   reduce noise for known update tools, package managers, backup jobs, and approved transfer paths.
+2. Transfer allowlist - initial implementation complete:
+   `flow_allow_transfer=<value>` exactly matches command, target, or executable path and lowers generic no-TTY public transfer flow noise without suppressing sensitive-read exfil or shell-downloader flows.
 
-3. User-presence enrichment:
+3. Negative scoring expansion:
+   reduce noise for known update tools, package managers, backup jobs, and approved transfer paths beyond exact allowlist matches.
+
+4. User-presence enrichment:
    add optional idle/user-activity source from logind or input devices and treat missing data as unknown, not benign.
 
-4. Credential exfil expansion:
+5. Credential exfil expansion:
    add `flow.credential_access_then_exfil_tool` for credential path access followed by archive, encode, copy, or transfer activity.
 
-5. Flow configuration syntax:
+6. Flow configuration syntax:
    keep compiled defaults, then add explicit flow tuning keys after behavior stabilizes.
 
 Example future syntax:

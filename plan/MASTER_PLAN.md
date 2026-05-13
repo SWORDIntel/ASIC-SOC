@@ -68,13 +68,13 @@ Completed:
 - Local spool path and logrotate scaffold.
 - Local JSONL replay validator for spool validation and normalized dry-run output.
 - Optional QIHSE dry-run forwarder with batching, validation, and checkpoint/resume support.
+- Quarantine reports for rejected or schema-incompatible forwarder inputs.
 
 Next implementation slice:
 
-1. Add quarantine handling for rejected or schema-incompatible batches.
-2. Add retry/backpressure design for future live submission.
-3. Add saved analytics query sketches for flow detections, process-tree investigation, and cross-host command similarity.
-4. Keep forwarding optional and separate from the daemon hot path.
+1. Add retry/backpressure design for future live submission.
+2. Add saved analytics query sketches for flow detections, process-tree investigation, and cross-host command similarity.
+3. Keep forwarding optional and separate from the daemon hot path.
 
 Later:
 

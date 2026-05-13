@@ -150,6 +150,78 @@ if not isinstance(entry.get("offset"), int) or entry["offset"] <= 0:
 PY
 }
 
+assert_quarantine_report() {
+    local quarantine_dir="$1"
+    local expected_source_path="$2"
+
+    python3 - "$quarantine_dir" "$expected_source_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+quarantine_dir, expected_source_path = sys.argv[1], sys.argv[2]
+reports = sorted(Path(quarantine_dir).iterdir())
+if len(reports) != 1:
+    print(f"expected exactly one quarantine report, found {len(reports)}", file=sys.stderr)
+    for report in reports:
+        print(report, file=sys.stderr)
+    sys.exit(1)
+
+report_path = reports[0]
+report_text = report_path.read_text(encoding="utf-8")
+lines = report_text.splitlines()
+if len(lines) != 1:
+    print("quarantine report must be one compact JSON line", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    payload = json.loads(lines[0])
+except json.JSONDecodeError as exc:
+    print(f"quarantine report is invalid JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+expected = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+if lines[0] != expected:
+    print("quarantine report is not compact sorted JSON", file=sys.stderr)
+    sys.exit(1)
+
+if payload.get("record") != "qihse_quarantine_report":
+    print("quarantine report has wrong record marker", file=sys.stderr)
+    sys.exit(1)
+
+error_count = payload.get("error_count")
+if not isinstance(error_count, int) or isinstance(error_count, bool) or error_count <= 0:
+    print(f"quarantine report error_count is invalid: {error_count!r}", file=sys.stderr)
+    sys.exit(1)
+
+errors = payload.get("errors")
+if not isinstance(errors, list) or len(errors) != error_count:
+    print("quarantine report errors length does not match error_count", file=sys.stderr)
+    sys.exit(1)
+
+for index, error in enumerate(errors, start=1):
+    if not isinstance(error, dict):
+        print(f"quarantine error {index} is not an object", file=sys.stderr)
+        sys.exit(1)
+    if error.get("path") != expected_source_path:
+        print(f"quarantine error {index} has wrong path: {error!r}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(error.get("message"), str) or not error["message"]:
+        print(f"quarantine error {index} is missing message: {error!r}", file=sys.stderr)
+        sys.exit(1)
+PY
+}
+
+assert_no_quarantine_report() {
+    local quarantine_dir="$1"
+
+    if find "$quarantine_dir" -mindepth 1 -maxdepth 1 | grep -q .; then
+        echo "FAIL: unexpected quarantine report created" >&2
+        find "$quarantine_dir" -mindepth 1 -maxdepth 1 -print >&2
+        exit 1
+    fi
+}
+
 test_dry_run_batches_compact_jsonl() {
     local output_file
     output_file="$(new_tmp)"
@@ -221,12 +293,46 @@ test_invalid_input_does_not_create_or_update_checkpoint() {
     echo "PASS: invalid input does not create or update checkpoint"
 }
 
+test_invalid_input_quarantines_without_checkpoint_update() {
+    local checkpoint_dir checkpoint_file quarantine_dir before
+    checkpoint_dir="$(new_tmp_dir)"
+    checkpoint_file="$checkpoint_dir/checkpoint.json"
+    quarantine_dir="$(new_tmp_dir)"
+
+    assert_failure "invalid input with quarantine fails before checkpoint creation" \
+        run_forwarder --dry-run --checkpoint "$checkpoint_file" \
+            --quarantine-dir "$quarantine_dir" \
+            "$FIXTURE_DIR/invalid_missing_field.jsonl"
+    assert_quarantine_report "$quarantine_dir" "$FIXTURE_DIR/invalid_missing_field.jsonl"
+    if [[ -e "$checkpoint_file" ]]; then
+        echo "FAIL: invalid quarantined input created checkpoint" >&2
+        exit 1
+    fi
+
+    printf '{"version":1,"paths":{"sentinel":{"line_count":9,"offset":99}}}\n' >"$checkpoint_file"
+    before="$(new_tmp)"
+    cp "$checkpoint_file" "$before"
+    quarantine_dir="$(new_tmp_dir)"
+    assert_failure "invalid input with quarantine fails before checkpoint update" \
+        run_forwarder --dry-run --checkpoint "$checkpoint_file" \
+            --quarantine-dir "$quarantine_dir" \
+            "$FIXTURE_DIR/invalid_missing_field.jsonl"
+    assert_quarantine_report "$quarantine_dir" "$FIXTURE_DIR/invalid_missing_field.jsonl"
+    if ! cmp -s "$before" "$checkpoint_file"; then
+        echo "FAIL: invalid quarantined input updated existing checkpoint" >&2
+        exit 1
+    fi
+    echo "PASS: invalid input quarantines without checkpoint create/update"
+}
+
 test_unknown_record_strictness() {
-    local output_file stderr_file
+    local output_file stderr_file quarantine_dir
     output_file="$(new_tmp)"
     stderr_file="$(new_tmp)"
+    quarantine_dir="$(new_tmp_dir)"
 
-    if ! run_forwarder --dry-run "$FIXTURE_DIR/unknown_record.jsonl" \
+    if ! run_forwarder --dry-run --quarantine-dir "$quarantine_dir" \
+        "$FIXTURE_DIR/unknown_record.jsonl" \
         >"$output_file" 2>"$stderr_file"; then
         echo "FAIL: non-strict unknown record should warn and skip" >&2
         cat "$stderr_file" >&2
@@ -238,10 +344,18 @@ test_unknown_record_strictness() {
         exit 1
     fi
     assert_batches "$output_file" "2"
-    echo "PASS: non-strict unknown records warn and skip"
+    assert_no_quarantine_report "$quarantine_dir"
+    echo "PASS: non-strict unknown records warn, skip, and do not quarantine"
 
     assert_failure "strict unknown record fails" \
         run_forwarder --dry-run --strict "$FIXTURE_DIR/unknown_record.jsonl"
+
+    quarantine_dir="$(new_tmp_dir)"
+    assert_failure "strict unknown record with quarantine fails" \
+        run_forwarder --dry-run --strict --quarantine-dir "$quarantine_dir" \
+            "$FIXTURE_DIR/unknown_record.jsonl"
+    assert_quarantine_report "$quarantine_dir" "$FIXTURE_DIR/unknown_record.jsonl"
+    echo "PASS: strict unknown record quarantines"
 }
 
 cd "$ROOT_DIR"
@@ -251,6 +365,7 @@ test_batch_size_splits_records
 test_live_mode_requires_dry_run
 test_checkpoint_and_resume
 test_invalid_input_does_not_create_or_update_checkpoint
+test_invalid_input_quarantines_without_checkpoint_update
 test_unknown_record_strictness
 
 echo "qihse forwarder tests passed"

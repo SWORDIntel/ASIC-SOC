@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         "--strict",
         action="store_true",
         help="fail unknown record types instead of warning and skipping them",
+    )
+    parser.add_argument(
+        "--quarantine-dir",
+        metavar="DIR",
+        help="optional directory for validation failure quarantine reports",
     )
     parser.add_argument("paths", nargs="+", help="JSONL files to dry-run forward")
 
@@ -115,14 +121,53 @@ def write_checkpoint(path: str, entries: dict[str, dict[str, int]]) -> None:
         checkpoint_file.write("\n")
 
 
+class CollectingValidator(Validator):
+    def __init__(self, strict: bool) -> None:
+        super().__init__(strict=strict)
+        self.collected_errors: list[dict[str, Any]] = []
+
+    def error(self, path: str, line_no: int, message: str) -> None:
+        super().error(path, line_no, message)
+        self.collected_errors.append(
+            {"line_number": line_no, "message": message, "path": path}
+        )
+
+    def file_error(self, path: str, message: str) -> None:
+        print(f"{path}: error: {message}", file=sys.stderr)
+        self.errors += 1
+        self.collected_errors.append({"message": message, "path": path})
+
+
+def write_quarantine_report(
+    quarantine_dir: str,
+    *,
+    source_paths: list[str],
+    errors: list[dict[str, Any]],
+) -> None:
+    report_dir = Path(quarantine_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report = {
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "error_count": len(errors),
+        "errors": errors,
+        "record": "qihse_quarantine_report",
+        "source_paths": source_paths,
+    }
+
+    report_path = report_dir / "qihse_quarantine_report.json"
+    with report_path.open("w", encoding="utf-8") as report_file:
+        json.dump(report, report_file, sort_keys=True, separators=(",", ":"))
+        report_file.write("\n")
+
+
 def validate_inputs(
     paths: list[str],
     *,
     strict: bool,
     checkpoint: dict[str, Any],
     resume: bool,
-) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]], int]:
-    validator = Validator(strict=strict)
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]], list[dict[str, Any]]]:
+    validator = CollectingValidator(strict=strict)
     accepted_records: list[dict[str, Any]] = []
     checkpoint_entries = dict(checkpoint.get("paths", {}))
 
@@ -136,11 +181,11 @@ def validate_inputs(
         )
         checkpoint_entries[path] = {"line_count": line_count, "offset": offset}
 
-    return accepted_records, checkpoint_entries, validator.errors
+    return accepted_records, checkpoint_entries, validator.collected_errors
 
 
 def validate_file(
-    validator: Validator,
+    validator: CollectingValidator,
     path: str,
     *,
     start_line: int,
@@ -168,8 +213,7 @@ def validate_file(
                 if len(validator.normalized_records) > previous_count:
                     accepted_records.append(validator.normalized_records.pop())
     except OSError as exc:
-        print(f"{path}: error: {exc}", file=sys.stderr)
-        validator.errors += 1
+        validator.file_error(path, str(exc))
 
     return line_count, offset
 
@@ -197,6 +241,18 @@ def main() -> int:
     )
 
     if errors:
+        if args.quarantine_dir:
+            try:
+                write_quarantine_report(
+                    args.quarantine_dir,
+                    source_paths=args.paths,
+                    errors=errors,
+                )
+            except OSError as exc:
+                print(
+                    f"{args.quarantine_dir}: error: cannot write quarantine report: {exc}",
+                    file=sys.stderr,
+                )
         return 1
 
     emit_batches(accepted_records, args.batch_size)

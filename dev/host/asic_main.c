@@ -93,6 +93,8 @@ struct edr_rules {
     enum edr_severity suspicious_port_severity[MAX_RULES];
     char suspicious_port_rule_ids[MAX_RULES][MAX_RULE_ID];
     size_t suspicious_port_count;
+    char flow_allow_transfer[MAX_RULES][EDR_MAX_TARGET];
+    size_t flow_allow_transfer_count;
     char disabled_rule_ids[MAX_RULES][MAX_RULE_ID];
     size_t disabled_rule_id_count;
     char severity_override_rule_ids[MAX_RULES][MAX_RULE_ID];
@@ -111,6 +113,7 @@ struct policy_summary {
     size_t sensitive_write_count;
     size_t jit_allow_comm_count;
     size_t suspicious_port_count;
+    size_t flow_allow_transfer_count;
     enum edr_severity min_severity;
     uint64_t dedup_window_seconds;
     enum edr_severity flow_sensitive_read_then_public_net_severity;
@@ -290,6 +293,34 @@ static bool remove_comm_rule(char values[][16], size_t *count, const char *value
     return removed;
 }
 
+static bool add_target_rule(char values[][EDR_MAX_TARGET], size_t *count,
+                            size_t capacity, const char *value) {
+    if (*count >= capacity) {
+        return false;
+    }
+    snprintf(values[*count], EDR_MAX_TARGET, "%s", value);
+    (*count)++;
+    return true;
+}
+
+static bool remove_target_rule(char values[][EDR_MAX_TARGET], size_t *count,
+                               const char *value) {
+    bool removed = false;
+    for (size_t i = 0; i < *count;) {
+        if (strcmp(values[i], value) == 0) {
+            size_t tail = *count - i - 1;
+            if (tail > 0) {
+                memmove(&values[i], &values[i + 1], tail * sizeof(values[0]));
+            }
+            (*count)--;
+            removed = true;
+            continue;
+        }
+        i++;
+    }
+    return removed;
+}
+
 static bool add_port_rule(uint16_t values[], enum edr_severity severities[],
                           char rule_ids[][MAX_RULE_ID], size_t *count,
                           size_t capacity, const char *value,
@@ -388,6 +419,7 @@ static struct policy_summary current_policy_summary(void) {
         .sensitive_write_count = rules.sensitive_write_count,
         .jit_allow_comm_count = rules.jit_allow_comm_count,
         .suspicious_port_count = rules.suspicious_port_count,
+        .flow_allow_transfer_count = rules.flow_allow_transfer_count,
         .min_severity = rules.min_severity,
         .dedup_window_seconds = rules.dedup_window_ns / NS_PER_SECOND,
         .flow_sensitive_read_then_public_net_severity =
@@ -514,7 +546,7 @@ static void write_policy_summary_console(FILE *out, const struct policy_summary 
     }
 
     fprintf(out,
-            "%sprofile=%s exec_exact=%zu exec_prefix=%zu sensitive_read=%zu sensitive_write=%zu jit_allow=%zu suspicious_ports=%zu min_severity=%d dedup_window_seconds=%llu flow_sensitive_read_then_public_net_severity=%d flow_sensitive_read_then_public_net_score=%u flow_shell_downloader_public_net_severity=%d flow_shell_downloader_public_net_score=%u flow_no_tty_public_transfer_tool_severity=%d flow_no_tty_public_transfer_tool_score=%u\n",
+            "%sprofile=%s exec_exact=%zu exec_prefix=%zu sensitive_read=%zu sensitive_write=%zu jit_allow=%zu suspicious_ports=%zu flow_allow_transfer=%zu min_severity=%d dedup_window_seconds=%llu flow_sensitive_read_then_public_net_severity=%d flow_sensitive_read_then_public_net_score=%u flow_shell_downloader_public_net_severity=%d flow_shell_downloader_public_net_score=%u flow_no_tty_public_transfer_tool_severity=%d flow_no_tty_public_transfer_tool_score=%u\n",
             prefix ? prefix : "",
             summary->profile_name ? summary->profile_name : "baseline",
             summary->suspicious_exec_exact_count,
@@ -523,6 +555,7 @@ static void write_policy_summary_console(FILE *out, const struct policy_summary 
             summary->sensitive_write_count,
             summary->jit_allow_comm_count,
             summary->suspicious_port_count,
+            summary->flow_allow_transfer_count,
             summary->min_severity,
             (unsigned long long)summary->dedup_window_seconds,
             summary->flow_sensitive_read_then_public_net_severity,
@@ -545,7 +578,8 @@ static void write_policy_summary_jsonl(FILE *out, const struct policy_summary *s
     fprintf(out,
             "\",\"exec_exact\":%zu,\"exec_prefix\":%zu,"
             "\"sensitive_read\":%zu,\"sensitive_write\":%zu,\"jit_allow\":%zu,"
-            "\"suspicious_ports\":%zu,\"min_severity\":%d,\"dedup_window_seconds\":%llu,"
+            "\"suspicious_ports\":%zu,\"flow_allow_transfer\":%zu,"
+            "\"min_severity\":%d,\"dedup_window_seconds\":%llu,"
             "\"flow_sensitive_read_then_public_net_severity\":%d,"
             "\"flow_sensitive_read_then_public_net_score\":%u,"
             "\"flow_shell_downloader_public_net_severity\":%d,"
@@ -558,6 +592,7 @@ static void write_policy_summary_jsonl(FILE *out, const struct policy_summary *s
             summary->sensitive_write_count,
             summary->jit_allow_comm_count,
             summary->suspicious_port_count,
+            summary->flow_allow_transfer_count,
             summary->min_severity,
             (unsigned long long)summary->dedup_window_seconds,
             summary->flow_sensitive_read_then_public_net_severity,
@@ -1150,6 +1185,14 @@ static bool load_rules_file(const char *path, bool required) {
                 fprintf(stderr, "invalid disable_suspicious_port '%s' on line %u in %s\n", value, line_no, path);
                 valid = false;
             }
+        } else if (strcmp(key, "flow_allow_transfer") == 0) {
+            if (!add_target_rule(rules.flow_allow_transfer, &rules.flow_allow_transfer_count,
+                                 MAX_RULES, value)) {
+                fprintf(stderr, "too many flow_allow_transfer rules on line %u in %s\n", line_no, path);
+                valid = false;
+            }
+        } else if (strcmp(key, "disable_flow_allow_transfer") == 0) {
+            remove_target_rule(rules.flow_allow_transfer, &rules.flow_allow_transfer_count, value);
         } else if (strcmp(key, "disable_rule_id") == 0) {
             if (!valid_rule_id(value) || !add_disabled_rule_id(value)) {
                 fprintf(stderr, "invalid disable_rule_id '%s' on line %u in %s\n", value, line_no, path);
@@ -1641,6 +1684,19 @@ static bool is_transfer_command(const char *comm, const char *target) {
                                 sizeof(transfer_tools) / sizeof(transfer_tools[0]));
 }
 
+static bool flow_transfer_allowlisted(const struct edr_event *e,
+                                      const struct process_context *proc) {
+    for (size_t i = rules.flow_allow_transfer_count; i > 0; i--) {
+        const char *value = rules.flow_allow_transfer[i - 1];
+        if ((e->comm[0] != '\0' && strcmp(e->comm, value) == 0) ||
+            (e->target[0] != '\0' && strcmp(e->target, value) == 0) ||
+            (proc->exe[0] != '\0' && strcmp(proc->exe, value) == 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool process_tree_has_shell_context(const struct edr_event *e,
                                            const struct process_context *proc) {
     return is_shell_command(e->comm, e->target) ||
@@ -1798,12 +1854,16 @@ static bool evaluate_connect_flow(const struct edr_event *e,
     }
 
     if (!proc->has_tty) {
+        bool allowlisted = flow_transfer_allowlisted(e, proc);
         return make_controlled_flow_finding(
-            default_flow_rule_severity(FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL),
+            allowlisted ? EDR_SEV_INFO :
+                default_flow_rule_severity(FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL),
             FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL,
             "transfer tool without TTY connected to public network",
-            default_flow_rule_score(FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL, false),
-            "no_tty,transfer_tool,public_destination",
+            allowlisted ? 20U :
+                default_flow_rule_score(FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL, false),
+            allowlisted ? "no_tty,transfer_tool,public_destination,flow_allow_transfer" :
+                "no_tty,transfer_tool,public_destination",
             root_pid,
             finding);
     }

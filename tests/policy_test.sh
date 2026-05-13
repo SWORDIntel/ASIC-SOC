@@ -678,8 +678,53 @@ test_check_config_emits_policy_summary() {
     assert_present 'sensitive_write=' "$summary_file" "--check-config summary missing sensitive_write counter"
     assert_present 'jit_allow=' "$summary_file" "--check-config summary missing jit_allow counter"
     assert_present 'suspicious_ports=' "$summary_file" "--check-config summary missing suspicious_ports counter"
+    assert_present 'flow_allow_transfer=' "$summary_file" "--check-config summary missing flow_allow_transfer counter"
     assert_present 'min_severity=' "$summary_file" "--check-config summary missing min_severity"
     assert_present 'dedup_window_seconds=' "$summary_file" "--check-config summary missing dedup_window_seconds"
+}
+
+test_check_config_flow_allow_transfer_count_add_remove() {
+    local config_file summary_file actual_count
+    config_file="$(base_config)"
+    summary_file="$(new_tmp /tmp/asic-edr-policy-flow-allow-summary.XXXXXX)"
+    printf '\nflow_allow_transfer=curl\nflow_allow_transfer=/usr/bin/wget\ndisable_flow_allow_transfer=curl\n' >> "$config_file"
+
+    cd "$DEV_DIR"
+    if ! ./asic_main --check-config -c "$config_file" > "$summary_file"; then
+        echo "--check-config rejected flow transfer allowlist controls" >&2
+        cat "$summary_file" >&2 || true
+        exit 1
+    fi
+
+    actual_count="$(summary_value flow_allow_transfer "$summary_file")"
+    if [[ "$actual_count" != "1" ]]; then
+        echo "unexpected flow_allow_transfer count after add/remove: $actual_count" >&2
+        cat "$summary_file" >&2 || true
+        exit 1
+    fi
+}
+
+test_check_config_flow_allow_transfer_preserves_severity_override() {
+    local config_file summary_file actual_count actual_severity actual_score
+    config_file="$(base_config)"
+    summary_file="$(new_tmp /tmp/asic-edr-policy-flow-allow-override-summary.XXXXXX)"
+    printf '\nprofile=developer-workstation\nflow_allow_transfer=curl\nrule_severity=flow.no_tty_public_transfer_tool,critical\n' >> "$config_file"
+
+    cd "$DEV_DIR"
+    if ! ./asic_main --check-config -c "$config_file" > "$summary_file"; then
+        echo "--check-config rejected flow transfer allowlist with severity override" >&2
+        cat "$summary_file" >&2 || true
+        exit 1
+    fi
+
+    actual_count="$(summary_value flow_allow_transfer "$summary_file")"
+    actual_severity="$(summary_value flow_no_tty_public_transfer_tool_severity "$summary_file")"
+    actual_score="$(summary_value flow_no_tty_public_transfer_tool_score "$summary_file")"
+    if [[ "$actual_count" != "1" || "$actual_severity" != "2" || "$actual_score" != "40" ]]; then
+        echo "flow allowlist did not preserve no-tty rule severity override behavior" >&2
+        cat "$summary_file" >&2 || true
+        exit 1
+    fi
 }
 
 test_check_config_summary_emits_profile() {
@@ -960,6 +1005,8 @@ test_check_config_accepts_supported_profiles
 test_check_config_rejects_invalid_policy
 test_check_config_rejects_invalid_profile
 test_check_config_emits_policy_summary
+test_check_config_flow_allow_transfer_count_add_remove
+test_check_config_flow_allow_transfer_preserves_severity_override
 test_check_config_summary_emits_profile
 test_check_config_summary_emits_profile_flow_defaults
 test_check_config_flow_override_promotes_developer_no_tty

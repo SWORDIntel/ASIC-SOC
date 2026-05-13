@@ -101,12 +101,12 @@ Implemented responsibilities:
 - validate schema before send
 - checkpoint offsets durably
 - resume from checkpointed line counts
+- quarantine rejected or schema-incompatible inputs with compact reports
 
 Future responsibilities:
 
 - tail local JSONL
 - retry with backpressure
-- quarantine rejected batches
 - expose forwarder health records
 
 Failure behavior:
@@ -138,6 +138,7 @@ Later analytics:
 1. Schema metadata - complete
 2. Local replay validator - complete
 3. Forwarder dry-run batching and checkpoint/resume - complete
-4. Quarantine handling and retry/backpressure design - next
-5. QIHSE submission integration
-6. Saved analytics packs
+4. Quarantine handling - complete
+5. Retry/backpressure design - next
+6. QIHSE submission integration
+7. Saved analytics packs

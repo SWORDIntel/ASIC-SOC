@@ -94,11 +94,11 @@ QIHSE is planned as an optional forwarder/importer target for historical analyti
 
 The replay validator runs outside the daemon hot path. It can validate one or more JSONL files, fail strictly on schema drift or unknown records when requested, and emit normalized dry-run JSONL for downstream importer or forwarder checks.
 
-The QIHSE forwarder is dry-run only. It validates records, emits compact `qihse_batch_dry_run` payloads, and supports checkpoint/resume without live network submission.
+The QIHSE forwarder is dry-run only. It validates records, emits compact `qihse_batch_dry_run` payloads, supports checkpoint/resume, and writes compact quarantine reports for rejected inputs without live network submission.
 
 ## Near-Term Work
 
-1. Add quarantine handling and retry/backpressure specs for optional forwarding.
-2. Add profile-aware flow allowlists and negative scoring.
+1. Add retry/backpressure specs for optional forwarding.
+2. Add additional profile-aware flow negative scoring.
 3. Add Debian packaging metadata.
 4. Add saved analytics query sketches for QIHSE import.

@@ -167,9 +167,10 @@ Use the optional dry-run forwarder to validate batching and checkpoint behavior 
 ./tools/asic_qihse_forwarder.py --dry-run --batch-size 100 /var/log/asic-edr/events.jsonl
 ./tools/asic_qihse_forwarder.py --dry-run --checkpoint /var/lib/asic-edr/qihse.checkpoint.json /var/log/asic-edr/events.jsonl
 ./tools/asic_qihse_forwarder.py --dry-run --resume --checkpoint /var/lib/asic-edr/qihse.checkpoint.json /var/log/asic-edr/events.jsonl
+./tools/asic_qihse_forwarder.py --dry-run --quarantine-dir /var/lib/asic-edr/quarantine /var/log/asic-edr/events.jsonl
 ```
 
-Live submission is intentionally not implemented yet. The forwarder currently validates records, emits compact `qihse_batch_dry_run` JSONL payloads, and updates checkpoints only after successful validation.
+Live submission is intentionally not implemented yet. The forwarder currently validates records, emits compact `qihse_batch_dry_run` JSONL payloads, updates checkpoints only after successful validation, and can write compact quarantine reports for rejected inputs.
 
 ## Install
 
@@ -196,6 +197,8 @@ Rule profiles select the built-in/default rule posture with `profile=<baseline|s
 Explicit config entries, `disable_<rule_key>`, `disable_rule_id`, and `rule_severity` apply on top of the selected profile.
 
 Compiled behavioral flows are profile-aware. `flow.sensitive_read_then_public_net` and `flow.shell_downloader_public_net` remain critical by default; `flow.no_tty_public_transfer_tool` is warning in `baseline`, critical in `server` and `high-signal`, and informational in `developer-workstation` unless promoted by `rule_severity`.
+
+Use `flow_allow_transfer=<comm-or-path>` to reduce benign no-TTY public transfer flow noise for exact command, target, or executable-path matches. Remove entries with `disable_flow_allow_transfer=<comm-or-path>`. This only lowers the generic `flow.no_tty_public_transfer_tool`; sensitive-read exfil and shell-downloader flows keep priority.
 
 Detection rules accept either `key=value` or `key=value,severity`. Supported severities are `info`, `warn`, and `critical`; later duplicate rules override earlier duplicate severities.
 Built-in/default detection rules can be removed by value with `disable_<rule_key>=value`, for example `disable_suspicious_port=4444`, or by ID with `disable_rule_id=<rule_id>`.
@@ -233,6 +236,8 @@ Supported keys:
 - `disable_sensitive_write`
 - `disable_jit_allow_comm`
 - `disable_suspicious_port`
+- `flow_allow_transfer`
+- `disable_flow_allow_transfer`
 - `disable_rule_id`
 - `rule_severity`
 
