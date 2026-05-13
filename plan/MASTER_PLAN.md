@@ -25,6 +25,7 @@ Turn the repository into a focused endpoint detection and response agent instead
 17. Add `--check-config` for offline policy validation.
 18. Add startup policy summary output and JSONL summary records when `-o` is used.
 19. Add executable provenance metadata to JSONL findings: device, inode, mode, owner ids, mtime, deleted executable marker, and writable-path classification.
+20. Add stable `rule_id` values to JSONL findings for built-in process, memory, file, and network detections.
 
 ## Phase 1: Detection Quality
 
@@ -52,15 +53,11 @@ Objective: make rules easier to maintain and safer to deploy.
    - `server`
    - `developer-workstation`
    - `high-signal`
-2. Add rule IDs:
-   - stable identifiers in JSONL
-   - easier disable/override handling
-   - policy regression tests keyed by ID
-3. Add config validation mode:
+2. Add config validation mode:
    - `--check-config`
    - no BPF load required
    - returns non-zero on invalid rules
-4. Add policy startup records:
+3. Add policy startup records:
    - structured startup/shutdown records
    - config load warnings in JSONL
 
@@ -126,4 +123,4 @@ Objective: prevent regressions while the sensor grows.
 ## Next Implementation Slice
 
 1. Add rule groups/profiles.
-2. Add stable rule IDs for JSONL findings, disables, overrides, and policy regression tests.
+2. Apply profiles to built-in rule selection and policy validation.

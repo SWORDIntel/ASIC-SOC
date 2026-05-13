@@ -153,6 +153,79 @@ for line_no, record in findings:
 PY
 }
 
+assert_finding_rule_ids() {
+    local file="$1"
+
+    python3 - "$file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+findings = []
+shadow_rule_ids = set()
+port_4444_rule_ids = set()
+
+with open(path, "r", encoding="utf-8") as lines:
+    for line_no, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(f"invalid JSONL on line {line_no}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if "severity" not in record or "reason" not in record:
+            continue
+
+        findings.append((line_no, record))
+        if record.get("target") == "/etc/shadow":
+            shadow_rule_ids.add(record.get("rule_id"))
+        if record.get("dst_port") == 4444:
+            port_4444_rule_ids.add(record.get("rule_id"))
+
+if not findings:
+    print("no finding JSONL records found", file=sys.stderr)
+    sys.exit(1)
+
+missing_or_invalid = [
+    line_no
+    for line_no, record in findings
+    if not isinstance(record.get("rule_id"), str) or not record["rule_id"]
+]
+if missing_or_invalid:
+    print(
+        "finding JSONL records missing non-empty string rule_id on lines: "
+        + ", ".join(str(line_no) for line_no in missing_or_invalid),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if not any(isinstance(record.get("rule_id"), str) and record["rule_id"] for _, record in findings):
+    print("no finding JSONL record contains a non-empty rule_id", file=sys.stderr)
+    sys.exit(1)
+
+if shadow_rule_ids and not all(
+    rule_id == "file.sensitive_read" or rule_id.startswith("file.sensitive_read.")
+    for rule_id in shadow_rule_ids
+):
+    print(
+        f"/etc/shadow finding rule_id mismatch: {sorted(shadow_rule_ids)!r}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if port_4444_rule_ids and not all(
+    rule_id == "net.suspicious_port" or rule_id.startswith("net.suspicious_port.")
+    for rule_id in port_4444_rule_ids
+):
+    print(
+        f"port 4444 finding rule_id mismatch: {sorted(port_4444_rule_ids)!r}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+PY
+}
+
 test_check_config_accepts_valid_policy() {
     local config_file
     config_file="$(base_config)"
@@ -224,6 +297,16 @@ test_runtime_jsonl_emits_exe_provenance_fields() {
     assert_finding_exe_provenance_fields "$output_file"
 }
 
+test_runtime_jsonl_emits_rule_ids() {
+    local config_file output_file
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-rule-id.XXXXXX.jsonl)"
+
+    run_agent_capture "$config_file" "$output_file"
+
+    assert_finding_rule_ids "$output_file"
+}
+
 test_critical_floor_suppresses_warnings() {
     local config_file output_file
     config_file="$(base_config)"
@@ -265,6 +348,7 @@ test_check_config_rejects_invalid_policy
 test_check_config_emits_policy_summary
 test_runtime_jsonl_emits_policy_summary
 test_runtime_jsonl_emits_exe_provenance_fields
+test_runtime_jsonl_emits_rule_ids
 test_critical_floor_suppresses_warnings
 test_per_rule_override_promotes_port
 test_disable_controls_suppress_selected_rules

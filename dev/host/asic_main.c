@@ -20,6 +20,7 @@
 #define DEFAULT_CONFIG_PATH "/etc/asic-edr/rules.conf"
 #define MAX_RULES 128
 #define MAX_CMDLINE 512
+#define MAX_RULE_ID 64
 #define DEFAULT_DEDUP_WINDOW_SECONDS 5ULL
 
 static volatile sig_atomic_t stop = 0;
@@ -33,6 +34,7 @@ enum edr_severity {
 
 struct edr_finding {
     enum edr_severity severity;
+    const char *rule_id;
     const char *reason;
 };
 
@@ -48,20 +50,25 @@ struct edr_options {
 struct edr_rules {
     char suspicious_exec_exact[MAX_RULES][64];
     enum edr_severity suspicious_exec_exact_severity[MAX_RULES];
+    char suspicious_exec_exact_rule_ids[MAX_RULES][MAX_RULE_ID];
     size_t suspicious_exec_exact_count;
     char suspicious_exec_prefix[MAX_RULES][64];
     enum edr_severity suspicious_exec_prefix_severity[MAX_RULES];
+    char suspicious_exec_prefix_rule_ids[MAX_RULES][MAX_RULE_ID];
     size_t suspicious_exec_prefix_count;
     char sensitive_read[MAX_RULES][EDR_MAX_TARGET];
     enum edr_severity sensitive_read_severity[MAX_RULES];
+    char sensitive_read_rule_ids[MAX_RULES][MAX_RULE_ID];
     size_t sensitive_read_count;
     char sensitive_write[MAX_RULES][EDR_MAX_TARGET];
     enum edr_severity sensitive_write_severity[MAX_RULES];
+    char sensitive_write_rule_ids[MAX_RULES][MAX_RULE_ID];
     size_t sensitive_write_count;
     char jit_allow_comm[MAX_RULES][16];
     size_t jit_allow_comm_count;
     uint16_t suspicious_ports[MAX_RULES];
     enum edr_severity suspicious_port_severity[MAX_RULES];
+    char suspicious_port_rule_ids[MAX_RULES][MAX_RULE_ID];
     size_t suspicious_port_count;
     uint64_t dedup_window_ns;
     enum edr_severity min_severity;
@@ -108,6 +115,7 @@ struct dedup_entry {
     char comm[16];
     char target[EDR_MAX_TARGET];
     const char *reason;
+    const char *rule_id;
     enum edr_severity severity;
 };
 
@@ -125,13 +133,16 @@ static void sig_handler(int sig) {
 
 static char *trim(char *value);
 
-static bool add_rule_value(char values[][64], enum edr_severity severities[], size_t *count,
-                           size_t capacity, const char *value, enum edr_severity severity) {
+static bool add_rule_value(char values[][64], enum edr_severity severities[],
+                           char rule_ids[][MAX_RULE_ID], size_t *count,
+                           size_t capacity, const char *value,
+                           enum edr_severity severity, const char *rule_id) {
     if (*count >= capacity) {
         return false;
     }
     snprintf(values[*count], 64, "%s", value);
     severities[*count] = severity;
+    snprintf(rule_ids[*count], MAX_RULE_ID, "%s", rule_id);
     (*count)++;
     return true;
 }
@@ -145,7 +156,8 @@ static bool add_comm_rule(char values[][16], size_t *count, size_t capacity, con
     return true;
 }
 
-static bool remove_rule_value(char values[][64], enum edr_severity severities[], size_t *count,
+static bool remove_rule_value(char values[][64], enum edr_severity severities[],
+                              char rule_ids[][MAX_RULE_ID], size_t *count,
                               const char *value) {
     bool removed = false;
     for (size_t i = 0; i < *count;) {
@@ -154,6 +166,7 @@ static bool remove_rule_value(char values[][64], enum edr_severity severities[],
             if (tail > 0) {
                 memmove(&values[i], &values[i + 1], tail * sizeof(values[0]));
                 memmove(&severities[i], &severities[i + 1], tail * sizeof(severities[0]));
+                memmove(&rule_ids[i], &rule_ids[i + 1], tail * sizeof(rule_ids[0]));
             }
             (*count)--;
             removed = true;
@@ -165,7 +178,7 @@ static bool remove_rule_value(char values[][64], enum edr_severity severities[],
 }
 
 static bool remove_path_rule(char values[][EDR_MAX_TARGET], enum edr_severity severities[],
-                             size_t *count, const char *value) {
+                             char rule_ids[][MAX_RULE_ID], size_t *count, const char *value) {
     bool removed = false;
     for (size_t i = 0; i < *count;) {
         if (strcmp(values[i], value) == 0) {
@@ -173,6 +186,7 @@ static bool remove_path_rule(char values[][EDR_MAX_TARGET], enum edr_severity se
             if (tail > 0) {
                 memmove(&values[i], &values[i + 1], tail * sizeof(values[0]));
                 memmove(&severities[i], &severities[i + 1], tail * sizeof(severities[0]));
+                memmove(&rule_ids[i], &rule_ids[i + 1], tail * sizeof(rule_ids[0]));
             }
             (*count)--;
             removed = true;
@@ -200,8 +214,10 @@ static bool remove_comm_rule(char values[][16], size_t *count, const char *value
     return removed;
 }
 
-static bool add_port_rule(uint16_t values[], enum edr_severity severities[], size_t *count,
-                          size_t capacity, const char *value, enum edr_severity severity) {
+static bool add_port_rule(uint16_t values[], enum edr_severity severities[],
+                          char rule_ids[][MAX_RULE_ID], size_t *count,
+                          size_t capacity, const char *value,
+                          enum edr_severity severity, const char *rule_id) {
     if (*count >= capacity) {
         return false;
     }
@@ -214,11 +230,13 @@ static bool add_port_rule(uint16_t values[], enum edr_severity severities[], siz
 
     values[*count] = (uint16_t)port;
     severities[*count] = severity;
+    snprintf(rule_ids[*count], MAX_RULE_ID, "%s", rule_id);
     (*count)++;
     return true;
 }
 
-static bool remove_port_rule(uint16_t values[], enum edr_severity severities[], size_t *count,
+static bool remove_port_rule(uint16_t values[], enum edr_severity severities[],
+                             char rule_ids[][MAX_RULE_ID], size_t *count,
                              const char *value) {
     char *end = NULL;
     unsigned long port = strtoul(value, &end, 10);
@@ -233,6 +251,7 @@ static bool remove_port_rule(uint16_t values[], enum edr_severity severities[], 
             if (tail > 0) {
                 memmove(&values[i], &values[i + 1], tail * sizeof(values[0]));
                 memmove(&severities[i], &severities[i + 1], tail * sizeof(severities[0]));
+                memmove(&rule_ids[i], &rule_ids[i + 1], tail * sizeof(rule_ids[0]));
             }
             (*count)--;
             removed = true;
@@ -270,13 +289,16 @@ static bool parse_severity(const char *value, enum edr_severity *out) {
     return false;
 }
 
-static bool add_path_rule(char values[][EDR_MAX_TARGET], enum edr_severity severities[], size_t *count,
-                          size_t capacity, const char *value, enum edr_severity severity) {
+static bool add_path_rule(char values[][EDR_MAX_TARGET], enum edr_severity severities[],
+                          char rule_ids[][MAX_RULE_ID], size_t *count,
+                          size_t capacity, const char *value,
+                          enum edr_severity severity, const char *rule_id) {
     if (*count >= capacity) {
         return false;
     }
     snprintf(values[*count], EDR_MAX_TARGET, "%s", value);
     severities[*count] = severity;
+    snprintf(rule_ids[*count], MAX_RULE_ID, "%s", rule_id);
     (*count)++;
     return true;
 }
@@ -334,15 +356,48 @@ static void write_policy_summary_jsonl(FILE *out, const struct policy_summary *s
     fflush(out);
 }
 
+static bool valid_rule_id(const char *rule_id) {
+    if (!rule_id || rule_id[0] == '\0') {
+        return false;
+    }
+    if (strlen(rule_id) >= MAX_RULE_ID) {
+        return false;
+    }
+
+    for (const unsigned char *p = (const unsigned char *)rule_id; *p; p++) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '.' || *p == '_' || *p == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool split_rule_value(char *raw_value, enum edr_severity default_severity,
-                             char **rule_value, enum edr_severity *severity) {
+                             const char *default_rule_id, char **rule_value,
+                             enum edr_severity *severity, const char **rule_id) {
     *severity = default_severity;
+    *rule_id = default_rule_id;
     char *comma = strrchr(raw_value, ',');
     if (comma) {
         *comma = '\0';
-        char *severity_value = trim(comma + 1);
-        if (!parse_severity(severity_value, severity)) {
-            return false;
+        char *suffix = trim(comma + 1);
+        if (parse_severity(suffix, severity)) {
+            *rule_id = default_rule_id;
+        } else {
+            if (!valid_rule_id(suffix)) {
+                return false;
+            }
+            char *severity_comma = strrchr(raw_value, ',');
+            if (!severity_comma) {
+                return false;
+            }
+            *severity_comma = '\0';
+            char *severity_value = trim(severity_comma + 1);
+            if (!parse_severity(severity_value, severity)) {
+                return false;
+            }
+            *rule_id = suffix;
         }
     }
 
@@ -378,26 +433,31 @@ static void init_default_rules(void) {
 
     for (size_t i = 0; i < sizeof(exec_exact) / sizeof(exec_exact[0]); i++) {
         add_rule_value(rules.suspicious_exec_exact, rules.suspicious_exec_exact_severity,
-                       &rules.suspicious_exec_exact_count, MAX_RULES, exec_exact[i], EDR_SEV_WARN);
+                       rules.suspicious_exec_exact_rule_ids, &rules.suspicious_exec_exact_count,
+                       MAX_RULES, exec_exact[i], EDR_SEV_WARN, "exec.suspicious_exact");
     }
     for (size_t i = 0; i < sizeof(exec_prefix) / sizeof(exec_prefix[0]); i++) {
         add_rule_value(rules.suspicious_exec_prefix, rules.suspicious_exec_prefix_severity,
-                       &rules.suspicious_exec_prefix_count, MAX_RULES, exec_prefix[i], EDR_SEV_WARN);
+                       rules.suspicious_exec_prefix_rule_ids, &rules.suspicious_exec_prefix_count,
+                       MAX_RULES, exec_prefix[i], EDR_SEV_WARN, "exec.suspicious_prefix");
     }
     for (size_t i = 0; i < sizeof(read_paths) / sizeof(read_paths[0]); i++) {
         add_path_rule(rules.sensitive_read, rules.sensitive_read_severity,
-                      &rules.sensitive_read_count, MAX_RULES, read_paths[i], EDR_SEV_WARN);
+                      rules.sensitive_read_rule_ids, &rules.sensitive_read_count,
+                      MAX_RULES, read_paths[i], EDR_SEV_WARN, "file.sensitive_read");
     }
     for (size_t i = 0; i < sizeof(write_paths) / sizeof(write_paths[0]); i++) {
         add_path_rule(rules.sensitive_write, rules.sensitive_write_severity,
-                      &rules.sensitive_write_count, MAX_RULES, write_paths[i], EDR_SEV_CRITICAL);
+                      rules.sensitive_write_rule_ids, &rules.sensitive_write_count,
+                      MAX_RULES, write_paths[i], EDR_SEV_CRITICAL, "file.sensitive_write");
     }
     for (size_t i = 0; i < sizeof(jit_allow) / sizeof(jit_allow[0]); i++) {
         add_comm_rule(rules.jit_allow_comm, &rules.jit_allow_comm_count, MAX_RULES, jit_allow[i]);
     }
     for (size_t i = 0; i < sizeof(ports) / sizeof(ports[0]); i++) {
         add_port_rule(rules.suspicious_ports, rules.suspicious_port_severity,
-                      &rules.suspicious_port_count, MAX_RULES, ports[i], EDR_SEV_WARN);
+                      rules.suspicious_port_rule_ids, &rules.suspicious_port_count,
+                      MAX_RULES, ports[i], EDR_SEV_WARN, "net.suspicious_port");
     }
 }
 
@@ -448,67 +508,83 @@ static bool load_rules_file(const char *path, bool required) {
         if (strcmp(key, "suspicious_exec_exact") == 0) {
             enum edr_severity severity;
             char *rule_value = NULL;
-            if (!split_rule_value(value, EDR_SEV_WARN, &rule_value, &severity)) {
+            const char *rule_id = NULL;
+            if (!split_rule_value(value, EDR_SEV_WARN, "exec.suspicious_exact",
+                                  &rule_value, &severity, &rule_id)) {
                 fprintf(stderr, "invalid suspicious_exec_exact on line %u in %s\n", line_no, path);
                 valid = false;
                 continue;
             }
             if (!add_rule_value(rules.suspicious_exec_exact, rules.suspicious_exec_exact_severity,
-                                &rules.suspicious_exec_exact_count, MAX_RULES, rule_value, severity)) {
+                                rules.suspicious_exec_exact_rule_ids,
+                                &rules.suspicious_exec_exact_count, MAX_RULES,
+                                rule_value, severity, rule_id)) {
                 fprintf(stderr, "too many suspicious_exec_exact rules on line %u in %s\n", line_no, path);
                 valid = false;
             }
         } else if (strcmp(key, "disable_suspicious_exec_exact") == 0) {
             remove_rule_value(rules.suspicious_exec_exact, rules.suspicious_exec_exact_severity,
+                              rules.suspicious_exec_exact_rule_ids,
                               &rules.suspicious_exec_exact_count, value);
         } else if (strcmp(key, "suspicious_exec_prefix") == 0) {
             enum edr_severity severity;
             char *rule_value = NULL;
-            if (!split_rule_value(value, EDR_SEV_WARN, &rule_value, &severity)) {
+            const char *rule_id = NULL;
+            if (!split_rule_value(value, EDR_SEV_WARN, "exec.suspicious_prefix",
+                                  &rule_value, &severity, &rule_id)) {
                 fprintf(stderr, "invalid suspicious_exec_prefix on line %u in %s\n", line_no, path);
                 valid = false;
                 continue;
             }
             if (!add_rule_value(rules.suspicious_exec_prefix, rules.suspicious_exec_prefix_severity,
-                                &rules.suspicious_exec_prefix_count, MAX_RULES, rule_value, severity)) {
+                                rules.suspicious_exec_prefix_rule_ids,
+                                &rules.suspicious_exec_prefix_count, MAX_RULES,
+                                rule_value, severity, rule_id)) {
                 fprintf(stderr, "too many suspicious_exec_prefix rules on line %u in %s\n", line_no, path);
                 valid = false;
             }
         } else if (strcmp(key, "disable_suspicious_exec_prefix") == 0) {
             remove_rule_value(rules.suspicious_exec_prefix, rules.suspicious_exec_prefix_severity,
+                              rules.suspicious_exec_prefix_rule_ids,
                               &rules.suspicious_exec_prefix_count, value);
         } else if (strcmp(key, "sensitive_read") == 0) {
             enum edr_severity severity;
             char *rule_value = NULL;
-            if (!split_rule_value(value, EDR_SEV_WARN, &rule_value, &severity)) {
+            const char *rule_id = NULL;
+            if (!split_rule_value(value, EDR_SEV_WARN, "file.sensitive_read",
+                                  &rule_value, &severity, &rule_id)) {
                 fprintf(stderr, "invalid sensitive_read on line %u in %s\n", line_no, path);
                 valid = false;
                 continue;
             }
             if (!add_path_rule(rules.sensitive_read, rules.sensitive_read_severity,
-                               &rules.sensitive_read_count, MAX_RULES, rule_value, severity)) {
+                               rules.sensitive_read_rule_ids, &rules.sensitive_read_count,
+                               MAX_RULES, rule_value, severity, rule_id)) {
                 fprintf(stderr, "too many sensitive_read rules on line %u in %s\n", line_no, path);
                 valid = false;
             }
         } else if (strcmp(key, "disable_sensitive_read") == 0) {
             remove_path_rule(rules.sensitive_read, rules.sensitive_read_severity,
-                             &rules.sensitive_read_count, value);
+                             rules.sensitive_read_rule_ids, &rules.sensitive_read_count, value);
         } else if (strcmp(key, "sensitive_write") == 0) {
             enum edr_severity severity;
             char *rule_value = NULL;
-            if (!split_rule_value(value, EDR_SEV_CRITICAL, &rule_value, &severity)) {
+            const char *rule_id = NULL;
+            if (!split_rule_value(value, EDR_SEV_CRITICAL, "file.sensitive_write",
+                                  &rule_value, &severity, &rule_id)) {
                 fprintf(stderr, "invalid sensitive_write on line %u in %s\n", line_no, path);
                 valid = false;
                 continue;
             }
             if (!add_path_rule(rules.sensitive_write, rules.sensitive_write_severity,
-                               &rules.sensitive_write_count, MAX_RULES, rule_value, severity)) {
+                               rules.sensitive_write_rule_ids, &rules.sensitive_write_count,
+                               MAX_RULES, rule_value, severity, rule_id)) {
                 fprintf(stderr, "too many sensitive_write rules on line %u in %s\n", line_no, path);
                 valid = false;
             }
         } else if (strcmp(key, "disable_sensitive_write") == 0) {
             remove_path_rule(rules.sensitive_write, rules.sensitive_write_severity,
-                             &rules.sensitive_write_count, value);
+                             rules.sensitive_write_rule_ids, &rules.sensitive_write_count, value);
         } else if (strcmp(key, "jit_allow_comm") == 0) {
             if (!add_comm_rule(rules.jit_allow_comm, &rules.jit_allow_comm_count, MAX_RULES, value)) {
                 fprintf(stderr, "too many jit_allow_comm rules on line %u in %s\n", line_no, path);
@@ -519,14 +595,18 @@ static bool load_rules_file(const char *path, bool required) {
         } else if (strcmp(key, "suspicious_port") == 0) {
             enum edr_severity severity;
             char *rule_value = NULL;
-            if (!split_rule_value(value, EDR_SEV_WARN, &rule_value, &severity) ||
+            const char *rule_id = NULL;
+            if (!split_rule_value(value, EDR_SEV_WARN, "net.suspicious_port",
+                                  &rule_value, &severity, &rule_id) ||
                 !add_port_rule(rules.suspicious_ports, rules.suspicious_port_severity,
-                               &rules.suspicious_port_count, MAX_RULES, rule_value, severity)) {
+                               rules.suspicious_port_rule_ids, &rules.suspicious_port_count,
+                               MAX_RULES, rule_value, severity, rule_id)) {
                 fprintf(stderr, "invalid suspicious_port '%s' on line %u in %s\n", value, line_no, path);
                 valid = false;
             }
         } else if (strcmp(key, "disable_suspicious_port") == 0) {
             if (!remove_port_rule(rules.suspicious_ports, rules.suspicious_port_severity,
+                                  rules.suspicious_port_rule_ids,
                                   &rules.suspicious_port_count, value)) {
                 fprintf(stderr, "invalid disable_suspicious_port '%s' on line %u in %s\n", value, line_no, path);
                 valid = false;
@@ -704,12 +784,14 @@ static const char *event_name(uint32_t type) {
 }
 
 static bool contains_rule(const char *haystack, char ruleset[][EDR_MAX_TARGET],
-                          enum edr_severity severities[], size_t rule_count,
-                          enum edr_severity *severity) {
+                          enum edr_severity severities[], char rule_ids[][MAX_RULE_ID],
+                          size_t rule_count, enum edr_severity *severity,
+                          const char **rule_id) {
     for (size_t i = rule_count; i > 0; i--) {
         size_t idx = i - 1;
         if (strstr(haystack, ruleset[idx]) != NULL) {
             *severity = severities[idx];
+            *rule_id = rule_ids[idx];
             return true;
         }
     }
@@ -730,12 +812,14 @@ static const char *basename_ptr(const char *path) {
     return base ? base + 1 : path;
 }
 
-static bool is_suspicious_exec(const char *target, enum edr_severity *severity) {
+static bool is_suspicious_exec(const char *target, enum edr_severity *severity,
+                               const char **rule_id) {
     const char *base = basename_ptr(target);
     for (size_t i = rules.suspicious_exec_exact_count; i > 0; i--) {
         size_t idx = i - 1;
         if (strcmp(base, rules.suspicious_exec_exact[idx]) == 0) {
             *severity = rules.suspicious_exec_exact_severity[idx];
+            *rule_id = rules.suspicious_exec_exact_rule_ids[idx];
             return true;
         }
     }
@@ -743,6 +827,7 @@ static bool is_suspicious_exec(const char *target, enum edr_severity *severity) 
         size_t idx = i - 1;
         if (strncmp(base, rules.suspicious_exec_prefix[idx], strlen(rules.suspicious_exec_prefix[idx])) == 0) {
             *severity = rules.suspicious_exec_prefix_severity[idx];
+            *rule_id = rules.suspicious_exec_prefix_rule_ids[idx];
             return true;
         }
     }
@@ -750,14 +835,18 @@ static bool is_suspicious_exec(const char *target, enum edr_severity *severity) 
     return false;
 }
 
-static bool is_sensitive_read_file(const char *target, enum edr_severity *severity) {
+static bool is_sensitive_read_file(const char *target, enum edr_severity *severity,
+                                   const char **rule_id) {
     return contains_rule(target, rules.sensitive_read, rules.sensitive_read_severity,
-                         rules.sensitive_read_count, severity);
+                         rules.sensitive_read_rule_ids, rules.sensitive_read_count,
+                         severity, rule_id);
 }
 
-static bool is_sensitive_write_file(const char *target, enum edr_severity *severity) {
+static bool is_sensitive_write_file(const char *target, enum edr_severity *severity,
+                                    const char **rule_id) {
     return contains_rule(target, rules.sensitive_write, rules.sensitive_write_severity,
-                         rules.sensitive_write_count, severity);
+                         rules.sensitive_write_rule_ids, rules.sensitive_write_count,
+                         severity, rule_id);
 }
 
 static bool opens_for_write(uint32_t flags) {
@@ -769,11 +858,13 @@ static uint16_t event_dst_port(const struct edr_event *e) {
     return ntohs(e->net_port);
 }
 
-static bool is_suspicious_port(uint16_t port, enum edr_severity *severity) {
+static bool is_suspicious_port(uint16_t port, enum edr_severity *severity,
+                               const char **rule_id) {
     for (size_t i = rules.suspicious_port_count; i > 0; i--) {
         size_t idx = i - 1;
         if (rules.suspicious_ports[idx] == port) {
             *severity = rules.suspicious_port_severity[idx];
+            *rule_id = rules.suspicious_port_rule_ids[idx];
             return true;
         }
     }
@@ -799,43 +890,53 @@ static void format_net_addr(const struct edr_event *e, char *dst, size_t dst_siz
     }
 }
 
+static struct edr_finding make_finding(enum edr_severity severity, const char *rule_id,
+                                       const char *reason) {
+    return (struct edr_finding){
+        .severity = severity,
+        .rule_id = rule_id,
+        .reason = reason,
+    };
+}
+
 static struct edr_finding evaluate_event(const struct edr_event *e) {
     enum edr_severity severity = EDR_SEV_INFO;
+    const char *rule_id = NULL;
 
-    if (e->type == EDR_EVENT_EXEC && is_suspicious_exec(e->target, &severity)) {
-        return (struct edr_finding){severity, "suspicious process execution"};
+    if (e->type == EDR_EVENT_EXEC && is_suspicious_exec(e->target, &severity, &rule_id)) {
+        return make_finding(severity, rule_id, "suspicious process execution");
     }
 
     if (e->type == EDR_EVENT_MPROTECT && (e->prot & PROT_EXEC) && !comm_allowed_for_jit(e->comm)) {
         if (e->prot & PROT_WRITE) {
-            return (struct edr_finding){EDR_SEV_CRITICAL, "RWX memory request"};
+            return make_finding(EDR_SEV_CRITICAL, "mem.rwx_mprotect", "RWX memory request");
         }
-        return (struct edr_finding){EDR_SEV_WARN, "mprotect executable memory request"};
+        return make_finding(EDR_SEV_WARN, "mem.exec_mprotect", "mprotect executable memory request");
     }
 
     if (e->type == EDR_EVENT_MMAP && (e->prot & PROT_EXEC) && !comm_allowed_for_jit(e->comm)) {
         if (e->prot & PROT_WRITE) {
-            return (struct edr_finding){EDR_SEV_CRITICAL, "RWX memory mapping"};
+            return make_finding(EDR_SEV_CRITICAL, "mem.rwx_mmap", "RWX memory mapping");
         }
         if (e->flags & MAP_ANONYMOUS) {
-            return (struct edr_finding){EDR_SEV_WARN, "anonymous executable memory mapping"};
+            return make_finding(EDR_SEV_WARN, "mem.anon_exec_mmap", "anonymous executable memory mapping");
         }
     }
 
     if (e->type == EDR_EVENT_OPENAT) {
-        if (opens_for_write(e->flags) && is_sensitive_write_file(e->target, &severity)) {
-            return (struct edr_finding){severity, "sensitive file opened for write"};
+        if (opens_for_write(e->flags) && is_sensitive_write_file(e->target, &severity, &rule_id)) {
+            return make_finding(severity, rule_id, "sensitive file opened for write");
         }
-        if (is_sensitive_read_file(e->target, &severity)) {
-            return (struct edr_finding){severity, "sensitive file access"};
+        if (is_sensitive_read_file(e->target, &severity, &rule_id)) {
+            return make_finding(severity, rule_id, "sensitive file access");
         }
     }
 
-    if (e->type == EDR_EVENT_CONNECT && is_suspicious_port(event_dst_port(e), &severity)) {
-        return (struct edr_finding){severity, "connection to suspicious port"};
+    if (e->type == EDR_EVENT_CONNECT && is_suspicious_port(event_dst_port(e), &severity, &rule_id)) {
+        return make_finding(severity, rule_id, "connection to suspicious port");
     }
 
-    return (struct edr_finding){EDR_SEV_INFO, "observed"};
+    return make_finding(EDR_SEV_INFO, "event.observed", "observed");
 }
 
 static void format_event(const struct edr_event *e, const struct process_context *proc,
@@ -914,13 +1015,15 @@ static void write_jsonl(FILE *out, const struct edr_event *e,
             "\",\"dst_port\":%u,\"prot\":%u,\"flags\":%u,"
             "\"exe_dev\":%llu,\"exe_inode\":%llu,\"exe_mode\":%u,\"exe_uid\":%u,\"exe_gid\":%u,"
             "\"exe_mtime\":%lld,\"exe_deleted\":%s,\"exe_writable_path\":%s,"
-            "\"severity\":%d,\"repeat_count\":%u,\"reason\":\"",
+            "\"severity\":%d,\"repeat_count\":%u,\"rule_id\":\"",
             e->type == EDR_EVENT_CONNECT ? event_dst_port(e) : 0,
             e->prot, e->flags,
             proc->exe_dev, proc->exe_inode, proc->exe_mode, proc->exe_uid, proc->exe_gid,
             proc->exe_mtime, proc->exe_deleted ? "true" : "false",
             proc->exe_writable_path ? "true" : "false",
             finding->severity, repeat_count);
+    json_escape(out, finding->rule_id);
+    fprintf(out, "\",\"reason\":\"");
     json_escape(out, finding->reason);
     fprintf(out, "\"}\n");
     fflush(out);
@@ -980,6 +1083,7 @@ static void emit_dedup_entry(struct edr_options *opts, struct dedup_entry *entry
 
     struct edr_finding finding = {
         .severity = entry->severity,
+        .rule_id = entry->rule_id,
         .reason = entry->reason,
     };
     emit_finding(opts, &entry->event, &finding, entry->repeat_count);
@@ -1016,6 +1120,7 @@ static bool suppress_duplicate(struct edr_options *opts, const struct edr_event 
     entry->repeat_count = 0;
     entry->event = *e;
     entry->reason = finding->reason;
+    entry->rule_id = finding->rule_id;
     entry->severity = finding->severity;
     snprintf(entry->comm, sizeof(entry->comm), "%s", e->comm);
     snprintf(entry->target, sizeof(entry->target), "%s", e->target);

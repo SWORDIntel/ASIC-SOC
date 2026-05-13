@@ -10,7 +10,7 @@ The active roadmap lives in `plan/MASTER_PLAN.md`.
 - A small rules engine for process, executable-memory, and sensitive-file alerts
 - Console output plus optional JSONL event export
 - Userspace process enrichment from `/proc` for parent, executable, cwd, and command line
-- JSONL findings include executable provenance: device, inode, mode, owner ids, mtime, deleted executable marker, and writable-path classification
+- JSONL findings include `rule_id` plus executable provenance: device, inode, mode, owner ids, mtime, deleted executable marker, and writable-path classification
 - Deduplicated repeated findings include `repeat_count`
 - Startup policy summaries for active rule counts, severity floor, and deduplication window
 
@@ -94,6 +94,18 @@ Default rules live in `config/rules.conf`. Installed systems read `/etc/asic-edr
 
 Detection rules accept either `key=value` or `key=value,severity`. Supported severities are `info`, `warn`, and `critical`; later duplicate rules override earlier duplicate severities.
 Built-in/default detection rules can be removed with `disable_<rule_key>=value`, for example `disable_suspicious_port=4444`.
+
+Stable finding `rule_id` values use the configured rule family for value-backed detections and fixed IDs for executable-memory detections:
+
+- `suspicious_exec_exact`
+- `suspicious_exec_prefix`
+- `sensitive_read`
+- `sensitive_write`
+- `suspicious_port`
+- `memory_mprotect_exec`
+- `memory_mprotect_rwx`
+- `memory_mmap_exec_anon`
+- `memory_mmap_rwx`
 
 Supported keys:
 
