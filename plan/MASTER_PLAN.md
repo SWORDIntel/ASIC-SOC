@@ -2,174 +2,119 @@
 
 ## Goal
 
-Turn the repository into a focused endpoint detection and response agent instead of a mixed-purpose hardware/security showcase.
+Keep ASIC-SOC focused as a local-first endpoint detection and response agent.
 
-## Completed Baseline
+The daemon should detect high-signal endpoint behavior locally, emit durable JSONL for collection and replay, and keep historical analytics or QIHSE forwarding outside the hot sensor path.
 
-1. Keep syscall telemetry for process execution and memory permission changes.
-2. Keep file-open telemetry for sensitive path access.
-3. Remove or archive everything unrelated to EDR from the build path.
-4. Emit structured logs for downstream collection.
-5. Load configurable rules and allowlists.
-6. Enrich findings with parent process, executable path, cwd, and command line.
-7. Track outbound connection metadata and suspicious destination ports.
-8. Provide a smoke-test target for build/runtime regression checks.
-9. Include repeat counters for deduplicated findings.
-10. Install log rotation for JSONL findings.
-11. Install a hardened systemd service unit.
-12. Make the deduplication window configurable from rules.
-13. Add configurable minimum finding severity.
-14. Add per-rule severity overrides.
-15. Add rule disable controls for built-in/default rules.
-16. Add policy regression tests for severity floors, overrides, and disables.
-17. Add `--check-config` for offline policy validation.
-18. Add startup policy summary output and JSONL summary records when `-o` is used.
-19. Add executable provenance metadata to JSONL findings: device, inode, mode, owner ids, mtime, deleted executable marker, and writable-path classification.
-20. Add stable `rule_id` values to JSONL findings for built-in process, memory, file, and network detections.
-21. Add ID-based policy controls with `disable_rule_id=<rule_id>` and `rule_severity=<rule_id>,<severity>`, including executable-memory rule IDs.
-22. Add EDR rule profiles with `baseline`, `server`, `developer-workstation`, and `high-signal` built-in postures.
-23. Add network destination classification in JSONL findings for destination scope, private-address, and loopback context.
-24. Add lineage and TTY enrichment as the first behavioral-flow foundation, including JSONL `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`.
-25. Add bounded process-tree flow state for short-lived behavioral correlation, including JSONL `flow_id`, `flow_score`, `flow_reasons`, `flow_window_seconds`, and `flow_root_pid`.
-26. Add ID-based disable and severity controls for compiled behavioral flow detections.
-27. Add `flow.sensitive_read_then_public_net` to correlate sensitive file access followed by public-network transfer behavior.
-28. Add JSONL schema and host identity metadata for replay and QIHSE-ready forwarding.
+## Current Baseline
+
+1. EDR-only build path with non-EDR material removed or archived.
+2. eBPF telemetry for `execve`, `mprotect`, `mmap`, `openat`, and `connect`.
+3. User-space daemon with JSONL export, console output, `--all-events`, and `--check-config`.
+4. Configurable policy with severity overrides, rule disables, stable `rule_id` values, rule profiles, and ID-based flow controls.
+5. Finding enrichment for process lineage, executable path, cwd, command line, executable provenance, TTY/session context, network destination classification, and replay metadata.
+6. Deduplication with configurable suppression window and repeat-count summaries.
+7. Compiled behavioral flows for shell-downloader public networking, no-TTY public transfer tools, and sensitive-read then public-network transfer behavior.
+8. Startup policy summary JSONL records and per-record schema/host metadata for replay and future forwarding.
+9. Smoke, policy, and ops validation targets for build/runtime regression checks.
+10. Systemd service and logrotate packaging scaffolds.
+
+## Roadmap Priorities
+
+1. Detection quality:
+   improve behavioral logic flows, reduce single-event noise, add user-presence context, and tune by endpoint profile.
+
+2. Replay and analytics:
+   validate local JSONL spool files, normalize records for downstream tools, and keep QIHSE optional.
+
+3. Controlled response:
+   add dry-run response candidates first, then explicit policy gates before any action can execute.
+
+4. Packaging and operations:
+   make installation, service health, log handling, and release artifacts reproducible.
+
+5. Test coverage:
+   keep parser, policy, runtime, service, replay, and package behavior covered as the sensor grows.
 
 ## Phase 1: Detection Quality
 
-Objective: improve signal quality without expanding the agent into non-EDR domains.
+Objective: make local findings more EDR-like without adding remote dependencies.
 
-1. Add behavioral flow detection:
-   - track short-lived activity windows per process tree
-   - correlate lineage, sensitive file access, network destination scope, and user/session context
-   - emit scored flow findings with stable rule IDs
-2. Add process lineage scoring:
-   - parent and grandparent command names
-   - shell-spawned interpreter/download tool chains
-   - suspicious parent/child pair rules
-3. Add user activity and session context:
-   - no controlling TTY versus interactive terminal
-   - service-launched versus user-launched process context
-   - optional idle-time source from logind, `/dev/input`, X11, or Wayland
-4. Add executable memory refinements:
-   - distinguish anonymous executable memory from file-backed executable mappings
-   - classify RWX mappings as critical
-   - allow per-process JIT exceptions from rules
-5. Add additional network rule grouping:
-   - named suspicious destination port groups
-   - profile-specific network group defaults
-   - per-group severity overrides
+Completed:
 
-## Phase 2: Policy Model
+- Lineage and TTY/session enrichment.
+- Bounded process-tree flow state.
+- Compiled flow findings with stable `flow_id`, `flow_score`, `flow_reasons`, `flow_window_seconds`, and `flow_root_pid`.
+- Flow policy controls through `disable_rule_id=<rule_id>` and `rule_severity=<rule_id>,<severity>`.
+- `flow.sensitive_read_then_public_net`.
 
-Objective: make rules easier to maintain and safer to deploy.
+Next:
 
-1. Add rule groups/profiles:
-   - `baseline`
-   - `server`
-   - `developer-workstation`
-   - `high-signal`
-2. Add config validation mode:
-   - `--check-config`
-   - no BPF load required
-   - returns non-zero on invalid rules
-3. Add policy startup records:
-   - structured startup/shutdown records
-   - config load warnings in JSONL
+1. Add profile-aware flow tuning.
+2. Add explicit flow thresholds by profile.
+3. Add negative scoring or allowlist hooks for known benign transfer paths.
+4. Add user idle/user-presence enrichment from logind or input sources where available.
+5. Add credential-access flow expansion for archive, encode, copy, or exfil tool chains.
 
-## Phase 3: Response And Operations
+## Phase 2: Replay And Historical Analytics
 
-Objective: keep response controlled and auditable.
+Objective: make JSONL durable and queryable before adding a forwarder.
 
-1. Add dry-run response actions:
-   - log-only process kill candidate
-   - log-only network containment candidate
-   - explicit action reason in JSONL
-2. Add response policy gates:
-   - disabled by default
-   - require `response_enabled=true`
-   - require per-rule `action=...`
-3. Add health telemetry:
-   - events received
-   - findings emitted
-   - dedup suppressions
-   - ring-buffer drops if exposed by libbpf/kernel
-4. Add service observability:
-   - systemd watchdog readiness
-   - runtime health state
-   - shutdown reason in JSONL
+Completed:
 
-## Phase 3A: Historical Analytics Backend
+- Startup `policy_summary` records.
+- Finding records with stable IDs and flow fields.
+- Schema and host metadata on startup and finding records.
+- Local spool path and logrotate scaffold.
 
-Objective: integrate QIHSE as an optional historical brain without making local detection depend on remote storage.
+Next implementation slice:
 
-1. Add schema metadata for durable forwarding:
-   - `schema_version`
-   - `agent_id`
-   - `hostname`
-   - `boot_id`
-   - `config_hash`
-2. Add JSONL replay tooling:
-   - validate records
-   - replay rotated local spool files
-   - dry-run QIHSE payloads
-3. Add QIHSE forwarder:
-   - tail JSONL
-   - batch records
-   - checkpoint offsets
-   - retry with backpressure
-4. Add QIHSE analytics packs:
-   - flow detection search
-   - no-TTY public transfer views
-   - sensitive-read then public-network correlation
-   - cross-host command-line similarity
+1. Add a local JSONL replay validator.
+2. Validate `policy_summary` and `finding` records against required field/type contracts.
+3. Validate optional context groups for network, provenance, lineage, and flow fields.
+4. Support normalized dry-run output for future QIHSE ingestion.
+5. Keep replay tooling separate from the daemon hot path.
 
-## Phase 4: Packaging
+Later:
 
-Objective: make deployment reproducible.
+1. Add QIHSE forwarder dry-run batching.
+2. Add offset checkpoints and retry/backpressure design.
+3. Add saved analytics queries for flow detections, process-tree investigation, and cross-host command similarity.
 
-1. Add Debian packaging:
-   - package binary, BPF object, rules, service, logrotate config
-   - post-install systemd daemon reload
-   - conffile handling for `/etc/asic-edr/rules.conf`
-2. Add release artifacts:
-   - build checksums
-   - versioned tarball
-   - install verification script
-3. Add install smoke check:
-   - verify service unit
-   - verify BPF object path
-   - verify rules path
-   - verify log directory permissions
+## Phase 3: Controlled Response
+
+Objective: record response intent safely before enabling any action.
+
+1. Add dry-run response candidate records for process termination and network containment.
+2. Add explicit response policy gates:
+   `response_enabled=true`, per-rule action mapping, and minimum severity.
+3. Add audit fields:
+   action candidate, reason, matched rule, flow context, and suppression reason.
+4. Keep enforcement disabled by default.
+
+## Phase 4: Operations And Packaging
+
+Objective: make deployment repeatable.
+
+1. Add Debian packaging for binary, BPF object, config, service, and logrotate files.
+2. Add release artifact checksums and install verification.
+3. Add service health telemetry:
+   events received, findings emitted, dedup suppressions, ring-buffer failures when exposed, and shutdown reason.
+4. Add systemd readiness/watchdog behavior.
 
 ## Phase 5: Test Coverage
 
-Objective: prevent regressions while the sensor grows.
+Objective: prevent regressions as policy and behavior logic expand.
 
-1. Add config parser unit tests around:
-   - severity parsing
-   - duplicate override order
-   - disable controls
-   - invalid values
-2. Add runtime tests around:
-   - sensitive write findings
-   - suspicious exec findings
-   - JIT allowlist behavior
-   - deduplication with `dedup_window_seconds=0`
-3. Add service/package tests:
-   - `systemd-analyze verify`
-   - `systemd-analyze security --offline`
-   - logrotate dry run
+1. Add parser/unit tests for severity parsing, duplicate override order, disables, invalid values, and profile interactions.
+2. Add runtime tests for sensitive writes, suspicious exec rules, JIT allowlist behavior, dedup edge cases, and representative flow detections.
+3. Add replay validator tests using known-good and known-bad JSONL fixtures.
+4. Add service/package tests for systemd units, logrotate, install paths, and release packaging.
 
-## Next Implementation Slice
+## Non-Goals
 
-1. Add JSONL replay validation tooling for local spool files.
-2. Validate required metadata, finding, policy summary, network, provenance, lineage, and flow fields.
-3. Support dry-run normalized output for future QIHSE ingestion.
-4. Keep replay tooling separate from the daemon hot path.
-
-## Later Integration Slice
-
-1. Add a local replay tool that can later feed QIHSE.
-2. Add QIHSE forwarder dry-run batching and checkpoint planning.
-3. Keep QIHSE optional and outside the daemon hot path.
+- Packet payload inspection.
+- Cloud reputation calls from the endpoint daemon.
+- QIHSE or other remote storage as a dependency for local detection.
+- Unbounded in-daemon event history.
+- Automatic response without explicit policy gates.

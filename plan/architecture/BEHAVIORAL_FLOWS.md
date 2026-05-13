@@ -2,70 +2,47 @@
 
 ## Objective
 
-Move ASIC-SOC from single-event matching toward EDR-style behavioral analytics that correlate process lineage, user presence, file access, and network activity into scored suspicious logic flows.
+Move ASIC-SOC from single-event matching toward EDR-style behavioral analytics that correlate process lineage, user/session context, file access, and network activity into scored suspicious logic flows.
 
-The target detection model is:
+## Implemented Foundation
 
-- observe short-lived activity windows per process tree
-- enrich events with lineage and user/session context
-- score combinations of suspicious behavior
-- emit one high-context flow finding instead of many disconnected low-context events
+1. Process context:
+   pid, ppid, grandparent pid, parent command, grandparent command, executable path, cwd, command line, uid, gid, TTY marker, and interactive-session marker.
 
-## Core Signals
+2. Bounded flow state:
+   short-lived per-process-tree state keyed by flow root pid and expired by a fixed time window.
 
-1. Process lineage
-   - pid, ppid, grandparent pid (`gppid`)
-   - parent command name and grandparent command name (`grandparent_comm`)
-   - executable path, cwd, cmdline, uid, gid
-   - controlling terminal and session identifiers where available
+3. Flow finding output:
+   `flow_id`, `flow_score`, `flow_reasons`, `flow_window_seconds`, and `flow_root_pid` on JSONL finding records.
 
-2. User activity and session context
-   - whether the process has a controlling TTY (`has_tty`)
-   - whether the process appears attached to an interactive terminal session (`interactive_session`)
-   - whether the process appears service-launched or user-launched
-   - optional future idle-time enrichment from logind, `/dev/input`, X11, or Wayland
+4. Policy controls:
+   stable flow IDs work with `disable_rule_id=<rule_id>` and `rule_severity=<rule_id>,<severity>`.
 
-3. File and credential access
-   - sensitive file reads and writes
-   - SSH keys, sudoers, shadow, browser/cloud credentials
-   - archive creation and execution from writable paths
-
-4. Network behavior
-   - public versus private or loopback destinations
-   - suspicious transfer tools
-   - public network activity after sensitive file access
-   - future byte counters if exposed by sensor coverage
-
-## Initial Flow Rules
+## Current Compiled Flow Rules
 
 1. `flow.shell_downloader_public_net`
-   - shell parent or grandparent
-   - downloader child such as `curl`, `wget`, `busybox`, `python`, or `perl`
-   - public destination connection in the same process tree
-   - first compiled flow target for the bounded process-tree state
+   - shell parent or grandparent context
+   - transfer tool such as `curl`, `wget`, `nc`, `ncat`, `socat`, `scp`, `rsync`, `rclone`, `busybox`, `python`, `python3`, or `perl`
+   - public destination connection
+   - critical severity
 
 2. `flow.no_tty_public_transfer_tool`
    - transfer tool process without controlling TTY
    - public destination connection
-   - stronger when the user/session appears idle or service-launched
-   - initial compiled flow target when no-TTY public transfer implementation is present
+   - warning severity by default
 
 3. `flow.sensitive_read_then_public_net`
-   - sensitive file read in a process tree
-   - public network connection within a short window
-   - critical when executed by a transfer or shell-spawned tool
+   - sensitive file read in the same process tree
+   - transfer tool public destination connection within the flow window
+   - critical severity
+   - higher score when shell context or no-TTY context is also present
 
-4. `flow.credential_access_then_exfil_tool`
-   - credential path access
-   - archive, encode, copy, or transfer tool observed
-   - public network destination
+## Scoring Direction
 
-## Scoring Model
+Use additive, explainable scoring so every flow can state why it fired.
 
-Use additive scoring so the detector can explain why a flow fired.
-
-- shell spawned downloader or transfer tool: `+30`
-- interpreter spawned shell or transfer tool: `+25`
+- shell-spawned transfer tool: `+30`
+- interpreter-spawned shell or transfer tool: `+25`
 - no controlling TTY: `+20`
 - no recent user input or idle user session: `+25`
 - public destination: `+20`
@@ -78,82 +55,35 @@ Suggested severity mapping:
 - `score >= 40`: warning
 - `score >= 70`: critical
 
-## JSONL Flow Finding Model
+## Next Flow Work
 
-Flow findings keep normal finding fields and add:
+1. Profile-aware flow tuning:
+   add profile-specific flow thresholds and default enablement for `baseline`, `server`, `developer-workstation`, and `high-signal`.
 
-- `flow_id`: stable flow detection id; initial compiled ids include `flow.shell_downloader_public_net`, `flow.no_tty_public_transfer_tool`, and `flow.sensitive_read_then_public_net`
-- `flow_score`: additive score assigned to the correlated process-tree behavior
-- `flow_reasons`: compact list of matched score contributors, such as shell ancestry, downloader or transfer tool, no controlling TTY, and public destination
-- `flow_window_seconds`: bounded correlation window used to join process, file, lineage/session, and network signals
-- `flow_root_pid`: process-tree root pid used as the flow-state key
-- `gppid`
-- `grandparent_comm`
-- `has_tty`
-- `interactive_session`
-- `user_idle_seconds` when available, otherwise omitted or `-1`
-- parent and grandparent context
+2. Negative scoring and allowlists:
+   reduce noise for known update tools, package managers, backup jobs, and approved transfer paths.
 
-## Policy Model
+3. User-presence enrichment:
+   add optional idle/user-activity source from logind or input devices and treat missing data as unknown, not benign.
 
-Flow rules should preserve the existing policy guarantees:
+4. Credential exfil expansion:
+   add `flow.credential_access_then_exfil_tool` for credential path access followed by archive, encode, copy, or transfer activity.
 
-- stable `rule_id`
-- `disable_rule_id=<rule_id>`
-- `rule_severity=<rule_id>,<severity>`
-- profile-aware defaults
-- `--check-config` validation
+5. Flow configuration syntax:
+   keep compiled defaults, then add explicit flow tuning keys after behavior stabilizes.
 
-First implementation can use compiled default flow rules with ID-based controls. A later parser can add explicit flow-rule syntax, for example:
+Example future syntax:
 
 ```ini
-flow_rule=shell_downloader_no_input,critical,flow.shell_downloader.no_input.public_net
 flow_window_seconds=120
 flow_score_warn=40
 flow_score_critical=70
+flow_rule=credential_access_then_exfil_tool,critical,flow.credential_access_then_exfil_tool
 ```
 
-## Implementation Slices
+## Constraints
 
-1. Lineage and TTY enrichment - complete
-   - add grandparent fields
-   - add TTY/session indicators
-   - emit JSONL context fields `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`
-
-2. Flow state cache - complete
-   - track recent process, file, and network signals by process tree
-   - expire state by time window
-   - keep counters bounded
-   - first target: shell/downloader/public-network detections
-
-3. Initial compiled flow detections - complete for first EDR flow set
-   - shell downloader public network flow
-   - no-TTY public transfer tool flow
-   - sensitive read then public network flow
-
-4. Flow policy controls - complete for compiled flow IDs
-   - ID-based disable/severity support for compiled flows
-   - profile-specific thresholds and default enablement remains future work
-
-5. Sensitive read then public network flow - complete
-   - reuse bounded process-tree state
-   - correlate sensitive file reads with public network activity within the flow window
-   - raise score when shell context or no-TTY context is also present
-
-6. Profile-aware flow tuning
-   - profile-specific flow thresholds
-   - default flow enablement by endpoint role
-   - explicit allowlist or negative scoring hooks
-
-7. User activity enrichment
-   - optional logind or input-device idle source
-   - fail closed to unknown, not to benign
-   - document privilege and desktop-environment constraints
-
-## Non-Goals For The First Flow Slice
-
-- live response actions
-- packet payload inspection
-- desktop-specific idle collection as a hard dependency
-- unbounded event history
-- cloud reputation calls from the endpoint sensor
+- Keep correlation bounded in memory and time.
+- Do not require QIHSE, cloud reputation, or packet payload inspection for local detection.
+- Do not add live response actions in flow detection code.
+- Prefer stable IDs and additive policy controls over ad hoc rule names.

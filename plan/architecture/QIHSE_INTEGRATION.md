@@ -2,15 +2,16 @@
 
 ## Objective
 
-Use QIHSE as the historical analytics and correlation backend for ASIC-SOC EDR without putting response-critical detection logic on a remote or heavyweight storage path.
+Use QIHSE as an optional historical analytics and correlation backend for ASIC-SOC EDR.
 
-The endpoint agent should continue to work when QIHSE is unavailable. QIHSE should receive durable event history for search, replay, clustering, and cross-host correlation.
+Local detection must continue to work when QIHSE is absent, slow, misconfigured, or unavailable.
 
 ## Architecture
 
 ```text
 eBPF sensor -> asic-edr daemon -> in-memory hot state
                               -> local JSONL spool
+                              -> replay validator
                               -> optional QIHSE forwarder/importer
                               -> QIHSE historical analytics
 ```
@@ -23,15 +24,15 @@ Keep inside `asic-edr`:
 - bounded flow state for near-real-time detection
 - local policy evaluation
 - local JSONL emission
-- response candidate generation and audit records
+- response candidate generation and local audit records
 
-Put in QIHSE:
+Keep outside `asic-edr`:
 
 - long-term event retention
+- replay validation and normalization
+- QIHSE batching and checkpointing
 - cross-host process-tree and flow search
-- historical baselining
-- similarity over command lines, flow reasons, and paths
-- campaign clustering and analyst investigation views
+- historical baselining and campaign clustering
 
 Do not require QIHSE for:
 
@@ -40,18 +41,16 @@ Do not require QIHSE for:
 - local response policy decisions
 - systemd service startup
 
-## Event Contract
+## Current Event Contract
 
-QIHSE ingestion should treat JSONL as the stable source of truth. The daemon already emits:
+The daemon emits JSONL as the stable source of truth.
 
-- startup policy summary records
-- finding records with `rule_id`
-- process lineage fields
-- executable provenance fields
-- network destination classification
-- behavioral flow fields when present
+Implemented record types:
 
-Schema metadata is now emitted before ingestion work:
+- `policy_summary`
+- `finding`
+
+Common metadata:
 
 - `schema_version`
 - `agent_id`
@@ -61,29 +60,49 @@ Schema metadata is now emitted before ingestion work:
 - `config_profile`
 - `config_hash`
 
-## Local Spool
+Implemented finding context:
 
-Before direct QIHSE writes, add a local spool model:
+- stable `rule_id`
+- process lineage
+- executable provenance
+- network destination classification
+- behavioral flow fields when present
 
-- append JSONL to `/var/log/asic-edr/events.jsonl`
-- rotate with existing logrotate policy
-- support replay from rotated JSONL files
-- avoid blocking the daemon on QIHSE availability
-- keep forwarder state separately, for example offset checkpoints
+## Next Slice: Replay Validator
 
-## Forwarder Model
-
-Implement QIHSE integration as a separate process or optional mode, not inside the hot ring-buffer path.
+Add a standalone local tool before direct QIHSE writes.
 
 Responsibilities:
 
-- tail JSONL events
+- read one or more JSONL files
+- validate JSON syntax
+- validate supported `schema_version`
+- validate required fields for `policy_summary`
+- validate required fields for `finding`
+- validate optional context groups for network, provenance, lineage, and flow fields
+- report bad line numbers and reasons
+- support normalized dry-run output for future ingestion
+
+Failure behavior:
+
+- invalid JSON: fail with line number
+- unsupported schema: fail with schema value
+- missing required field: fail with record type and field name
+- unknown record type: warn by default, fail in strict mode later
+
+## Forwarder Model
+
+Implement QIHSE forwarding as a separate process or optional mode after replay validation exists.
+
+Responsibilities:
+
+- tail local JSONL
 - batch records
-- validate schema version
-- apply backpressure and retry policy
-- checkpoint durable offsets
-- submit to QIHSE
-- expose forwarder health metrics
+- validate schema before send
+- checkpoint offsets durably
+- retry with backpressure
+- quarantine rejected batches
+- expose forwarder health records
 
 Failure behavior:
 
@@ -91,25 +110,6 @@ Failure behavior:
 - schema mismatch: quarantine rejected batch and continue
 - oversized event: write rejection record and continue
 - auth failure: stop forwarding and report unhealthy
-
-## QIHSE Record Types
-
-1. `policy_summary`
-   - profile, rule counts, severity floor, dedup window, config hash
-
-2. `finding`
-   - all JSONL finding fields
-   - normalized host and agent identity
-
-3. `flow_finding`
-   - finding fields plus flow metadata
-   - score and reason features for similarity/correlation
-
-4. `health`
-   - events received
-   - findings emitted
-   - dedup suppressions
-   - forwarder status
 
 ## Analytics Goals
 
@@ -131,32 +131,8 @@ Later analytics:
 ## Implementation Slices
 
 1. Schema metadata - complete
-   - add `schema_version`, `agent_id`, `hostname`, `boot_id`, `agent_version`, `config_hash`
-   - keep fields stable and test JSONL type contracts
-
-2. Local replay tool
-   - read JSONL
-   - validate records
-   - print normalized records or dry-run ingest payloads
-
-3. QIHSE forwarder scaffold
-   - separate binary/script
-   - tail JSONL
-   - batch and checkpoint
-   - dry-run mode first
-
-4. QIHSE ingestion
-   - submit records to QIHSE
-   - retry/backoff
-   - rejection handling
-
-5. QIHSE analytics packs
-   - saved queries for flow detections
-   - process-tree investigation views
-   - cross-host campaign clustering
-
-## Near-Term Decision
-
-Local EDR correctness now includes `flow.sensitive_read_then_public_net`.
-
-The next QIHSE-enabling slice should add local JSONL replay validation so ingestion has stable type checks before forwarder work begins.
+2. Local replay validator - next
+3. Forwarder dry-run batching
+4. Offset checkpoints and retry/backpressure
+5. QIHSE submission integration
+6. Saved analytics packs
