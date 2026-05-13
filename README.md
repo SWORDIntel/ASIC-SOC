@@ -12,6 +12,7 @@ The active roadmap lives in `plan/MASTER_PLAN.md`.
 - Userspace process enrichment from `/proc` for parent, executable, cwd, and command line
 - JSONL findings include `rule_id` plus executable provenance: device, inode, mode, owner ids, mtime, deleted executable marker, and writable-path classification
 - JSONL findings include first-stage behavioral-flow context: `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`
+- Behavioral flow findings add bounded process-tree correlation fields: `flow_id`, `flow_score`, `flow_reasons`, `flow_window_seconds`, and `flow_root_pid`
 - JSONL network findings include destination context fields for scope, privacy, and loopback classification
 - Deduplicated repeated findings include `repeat_count`
 - Startup policy summaries for active rule counts, severity floor, and deduplication window
@@ -103,6 +104,16 @@ Findings also carry process lineage and session fields used by behavioral-flow d
 - `grandparent_comm`: grandparent command name when it can be resolved, otherwise an empty string
 - `has_tty`: boolean marker for whether the process appears to have a controlling terminal
 - `interactive_session`: boolean marker for whether the process appears tied to an interactive terminal session
+
+Behavioral flow findings correlate short-lived process-tree activity and add:
+
+- `flow_id`: stable flow detection id, for example `flow.shell_downloader_public_net` or `flow.no_tty_public_transfer_tool`
+- `flow_score`: additive suspicion score for the correlated behavior
+- `flow_reasons`: compact reason list explaining the score contributors
+- `flow_window_seconds`: time window used for the bounded process-tree correlation
+- `flow_root_pid`: process-tree root pid used as the flow correlation key
+
+Initial compiled flow detections cover shell-spawned downloader or transfer-tool activity that reaches a public network destination, and no-TTY public transfer-tool activity.
 
 ## Install
 

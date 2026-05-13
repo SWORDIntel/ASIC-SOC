@@ -30,6 +30,8 @@ Turn the repository into a focused endpoint detection and response agent instead
 22. Add EDR rule profiles with `baseline`, `server`, `developer-workstation`, and `high-signal` built-in postures.
 23. Add network destination classification in JSONL findings for destination scope, private-address, and loopback context.
 24. Add lineage and TTY enrichment as the first behavioral-flow foundation, including JSONL `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`.
+25. Add bounded process-tree flow state for short-lived behavioral correlation, including JSONL `flow_id`, `flow_score`, `flow_reasons`, `flow_window_seconds`, and `flow_root_pid`.
+26. Add ID-based disable and severity controls for compiled behavioral flow detections.
 
 ## Phase 1: Detection Quality
 
@@ -134,7 +136,7 @@ Objective: prevent regressions while the sensor grows.
 
 ## Next Implementation Slice
 
-1. Add bounded process-tree flow state for shell/downloader/public-network detections.
-2. Track recent process execution and public network signals by process tree.
-3. Expire flow state by a short configurable window and keep per-tree counters bounded.
-4. Use the completed lineage and TTY fields as context for initial compiled flow detections.
+1. Add `flow.sensitive_read_then_public_net` using the bounded process-tree state.
+2. Track sensitive file reads and public network connects by process tree.
+3. Score higher when the flow also includes shell/downloader context or no TTY.
+4. Keep flow findings controlled by stable rule IDs.

@@ -23,21 +23,23 @@
 - network events: destination address, destination port, address family, destination scope, private-address marker, and loopback classification
 - network destination classification: JSONL `connect` findings expose `dst_scope`, `dst_is_private`, and `dst_is_loopback`; loopback destinations are local-only, private destinations cover RFC1918 IPv4 and unique-local IPv6 ranges, public destinations are externally routable, and unknown/unclassified values use an empty scope string
 - alerts: timestamp, source, message, severity, stable `rule_id`
+- behavioral flow findings: normal finding fields plus `flow_id`, `flow_score`, `flow_reasons`, `flow_window_seconds`, and `flow_root_pid`; flow findings are produced from bounded process-tree state that correlates recent exec, file, lineage/session, and network signals
 - policy profile: `profile=<baseline|server|developer-workstation|high-signal>` selects built-in/default rule posture
 - policy threshold: normal-mode output is controlled by `min_severity`
 - policy overrides: detection rules can set per-rule severity with `key=value,severity`; built-in/default rules can also use `rule_severity=<rule_id>,<severity>`
 - policy disables: built-in/default detection rules can be removed with `disable_<rule_key>=value` or `disable_rule_id=<rule_id>`
 - policy summary: startup output reports active profile, rule counts, active severity floor, and deduplication window
 - deduplication: repeated findings are suppressed and summarized with `repeat_count`; the suppression window is controlled by `dedup_window_seconds`
-- behavioral flow foundation: lineage and TTY/session context are emitted on JSONL findings through `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`; `plan/architecture/BEHAVIORAL_FLOWS.md` defines the planned process-tree correlation model for suspicious logic flows, including no-TTY or idle-user public transfer activity
+- behavioral flow foundation: lineage and TTY/session context are emitted on JSONL findings through `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`; initial compiled flow detections cover shell/downloader/public-network activity and no-TTY public transfer-tool activity
 
 ## Rule IDs
 
 Value-backed built-in detections use their configured family as the stable `rule_id`: `exec.suspicious_exact`, `exec.suspicious_prefix`, `file.sensitive_read`, `file.sensitive_write`, and `net.suspicious_port`.
 Executable-memory detections use fixed IDs: `mem.exec_mprotect`, `mem.rwx_mprotect`, `mem.anon_exec_mmap`, and `mem.rwx_mmap`. These memory rule IDs can be controlled with `disable_rule_id` and `rule_severity`.
+Compiled behavioral flow detections use their flow ids as stable rule ids, including `flow.shell_downloader_public_net` and `flow.no_tty_public_transfer_tool`.
 
 ## Near-Term Work
 
-1. Add bounded process-tree flow state for shell/downloader/public-network detections.
-2. Add initial compiled behavioral flow detections using lineage, TTY/session, and network destination context.
+1. Add `flow.sensitive_read_then_public_net` using the existing bounded process-tree state.
+2. Add profile-specific behavioral flow thresholds and default enablement.
 3. Add Debian packaging metadata.

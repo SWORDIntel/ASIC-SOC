@@ -42,11 +42,13 @@ The target detection model is:
    - shell parent or grandparent
    - downloader child such as `curl`, `wget`, `busybox`, `python`, or `perl`
    - public destination connection in the same process tree
+   - first compiled flow target for the bounded process-tree state
 
 2. `flow.no_tty_public_transfer_tool`
    - transfer tool process without controlling TTY
    - public destination connection
    - stronger when the user/session appears idle or service-launched
+   - initial compiled flow target when no-TTY public transfer implementation is present
 
 3. `flow.sensitive_read_then_public_net`
    - sensitive file read in a process tree
@@ -78,13 +80,13 @@ Suggested severity mapping:
 
 ## JSONL Flow Finding Model
 
-Flow findings should keep normal finding fields and add:
+Flow findings keep normal finding fields and add:
 
-- `flow_id`
-- `flow_score`
-- `flow_reasons`
-- `flow_window_seconds`
-- `flow_root_pid`
+- `flow_id`: stable flow detection id; initial compiled ids include `flow.shell_downloader_public_net` and `flow.no_tty_public_transfer_tool`
+- `flow_score`: additive score assigned to the correlated process-tree behavior
+- `flow_reasons`: compact list of matched score contributors, such as shell ancestry, downloader or transfer tool, no controlling TTY, and public destination
+- `flow_window_seconds`: bounded correlation window used to join process, file, lineage/session, and network signals
+- `flow_root_pid`: process-tree root pid used as the flow-state key
 - `gppid`
 - `grandparent_comm`
 - `has_tty`
@@ -118,22 +120,27 @@ flow_score_critical=70
    - add TTY/session indicators
    - emit JSONL context fields `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`
 
-2. Flow state cache - next
+2. Flow state cache - complete
    - track recent process, file, and network signals by process tree
    - expire state by time window
    - keep counters bounded
    - first target: shell/downloader/public-network detections
 
-3. Initial compiled flow detections
+3. Initial compiled flow detections - partial
    - shell downloader public network flow
-   - no-TTY public transfer tool flow
-   - sensitive read then public network flow
+   - no-TTY public transfer tool flow when implementation lands
+   - sensitive read then public network flow remains the next detection expansion
 
-4. Flow policy controls
+4. Flow policy controls - complete for compiled flow IDs
    - ID-based disable/severity support for compiled flows
-   - profile-specific thresholds and default enablement
+   - profile-specific thresholds and default enablement remains future work
 
-5. User activity enrichment
+5. Sensitive read then public network flow - next
+   - reuse bounded process-tree state
+   - correlate sensitive file reads with public network activity within the flow window
+   - raise severity when a shell-spawned transfer tool or writable-path executable is involved
+
+6. User activity enrichment
    - optional logind or input-device idle source
    - fail closed to unknown, not to benign
    - document privilege and desktop-environment constraints

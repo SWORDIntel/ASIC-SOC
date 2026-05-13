@@ -22,6 +22,8 @@
 #define MAX_CMDLINE 512
 #define MAX_RULE_ID 64
 #define DEFAULT_DEDUP_WINDOW_SECONDS 5ULL
+#define FLOW_STATE_ENTRIES 256
+#define FLOW_WINDOW_SECONDS 120U
 
 static volatile sig_atomic_t stop = 0;
 static struct bpf_link *links[5];
@@ -43,6 +45,12 @@ struct edr_finding {
     enum edr_severity severity;
     const char *rule_id;
     const char *reason;
+    bool has_flow;
+    const char *flow_id;
+    uint32_t flow_score;
+    const char *flow_reasons;
+    uint32_t flow_window_seconds;
+    uint32_t flow_root_pid;
 };
 
 struct edr_options {
@@ -137,6 +145,23 @@ struct dedup_entry {
     const char *reason;
     const char *rule_id;
     enum edr_severity severity;
+    bool has_flow;
+    const char *flow_id;
+    uint32_t flow_score;
+    const char *flow_reasons;
+    uint32_t flow_window_seconds;
+    uint32_t flow_root_pid;
+};
+
+struct flow_state_entry {
+    bool active;
+    uint32_t root_pid;
+    uint64_t last_seen_ns;
+    bool shell_seen;
+    bool transfer_exec_seen;
+    bool public_connect_seen;
+    uint32_t shell_pid;
+    uint32_t transfer_pid;
 };
 
 #define DEDUP_ENTRIES 128
@@ -144,6 +169,8 @@ struct dedup_entry {
 
 static struct dedup_entry dedup_cache[DEDUP_ENTRIES];
 static size_t dedup_cursor = 0;
+static struct flow_state_entry flow_state[FLOW_STATE_ENTRIES];
+static size_t flow_state_cursor = 0;
 static struct edr_rules rules;
 
 static void sig_handler(int sig) {
@@ -153,6 +180,8 @@ static void sig_handler(int sig) {
 
 static char *trim(char *value);
 static void json_escape(FILE *out, const char *value);
+static bool make_controlled_finding(enum edr_severity default_severity, const char *rule_id,
+                                    const char *reason, struct edr_finding *finding);
 
 static bool add_rule_value(char values[][64], enum edr_severity severities[],
                            char rule_ids[][MAX_RULE_ID], size_t *count,
@@ -523,9 +552,18 @@ static bool known_rule_id(const char *rule_id) {
         "mem.rwx_mmap",
         "mem.anon_exec_mmap",
     };
+    static const char *flow_rule_ids[] = {
+        "flow.shell_downloader_public_net",
+        "flow.no_tty_public_transfer_tool",
+    };
 
     for (size_t i = 0; i < sizeof(memory_rule_ids) / sizeof(memory_rule_ids[0]); i++) {
         if (strcmp(memory_rule_ids[i], rule_id) == 0) {
+            return true;
+        }
+    }
+    for (size_t i = 0; i < sizeof(flow_rule_ids) / sizeof(flow_rule_ids[0]); i++) {
+        if (strcmp(flow_rule_ids[i], rule_id) == 0) {
             return true;
         }
     }
@@ -1337,6 +1375,198 @@ static struct net_classification classify_net_destination(const struct edr_event
     return classification;
 }
 
+static uint32_t flow_root_pid(const struct edr_event *e, const struct process_context *proc) {
+    if (proc->gppid != 0) {
+        return proc->gppid;
+    }
+    if (proc->ppid != 0) {
+        return proc->ppid;
+    }
+    return e->pid;
+}
+
+static bool comm_in_list(const char *comm, const char *const values[], size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(comm, values[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *path_basename(const char *value) {
+    const char *slash = strrchr(value, '/');
+    return slash ? slash + 1 : value;
+}
+
+static bool command_name_in_list(const char *comm, const char *target,
+                                 const char *const values[], size_t count) {
+    if (comm_in_list(comm, values, count)) {
+        return true;
+    }
+    if (target && target[0] != '\0' && comm_in_list(path_basename(target), values, count)) {
+        return true;
+    }
+    return false;
+}
+
+static bool is_shell_command(const char *comm, const char *target) {
+    static const char *const shells[] = {
+        "sh", "bash", "dash", "zsh",
+    };
+    return command_name_in_list(comm, target, shells, sizeof(shells) / sizeof(shells[0]));
+}
+
+static bool is_transfer_command(const char *comm, const char *target) {
+    static const char *const transfer_tools[] = {
+        "curl", "wget", "nc", "ncat", "socat", "scp", "rsync", "rclone",
+        "busybox", "python", "python3", "perl",
+    };
+    return command_name_in_list(comm, target, transfer_tools,
+                                sizeof(transfer_tools) / sizeof(transfer_tools[0]));
+}
+
+static bool process_tree_has_shell_context(const struct edr_event *e,
+                                           const struct process_context *proc) {
+    return is_shell_command(e->comm, e->target) ||
+           is_shell_command(proc->parent_comm, NULL) ||
+           is_shell_command(proc->grandparent_comm, NULL);
+}
+
+static bool flow_entry_expired(const struct flow_state_entry *entry, uint64_t now_ns) {
+    return entry->active &&
+           (now_ns < entry->last_seen_ns ||
+            now_ns - entry->last_seen_ns > (uint64_t)FLOW_WINDOW_SECONDS * NS_PER_SECOND);
+}
+
+static struct flow_state_entry *flow_state_get(uint32_t root_pid, uint64_t now_ns) {
+    struct flow_state_entry *free_entry = NULL;
+
+    for (size_t i = 0; i < FLOW_STATE_ENTRIES; i++) {
+        struct flow_state_entry *entry = &flow_state[i];
+        if (flow_entry_expired(entry, now_ns)) {
+            memset(entry, 0, sizeof(*entry));
+        }
+        if (entry->active && entry->root_pid == root_pid) {
+            return entry;
+        }
+        if (!entry->active && !free_entry) {
+            free_entry = entry;
+        }
+    }
+
+    if (!free_entry) {
+        free_entry = &flow_state[flow_state_cursor++ % FLOW_STATE_ENTRIES];
+    }
+
+    memset(free_entry, 0, sizeof(*free_entry));
+    free_entry->active = true;
+    free_entry->root_pid = root_pid;
+    free_entry->last_seen_ns = now_ns;
+    return free_entry;
+}
+
+static void flow_state_observe_event(const struct edr_event *e,
+                                     const struct process_context *proc) {
+    if (e->type != EDR_EVENT_EXEC && e->type != EDR_EVENT_CONNECT) {
+        return;
+    }
+
+    struct flow_state_entry *entry = flow_state_get(flow_root_pid(e, proc), e->timestamp_ns);
+    entry->last_seen_ns = e->timestamp_ns;
+
+    if (e->type == EDR_EVENT_EXEC) {
+        if (is_shell_command(e->comm, e->target)) {
+            entry->shell_seen = true;
+            entry->shell_pid = e->pid;
+        }
+        if (is_transfer_command(e->comm, e->target)) {
+            entry->transfer_exec_seen = true;
+            entry->transfer_pid = e->pid;
+        }
+        return;
+    }
+
+    if (strcmp(classify_net_destination(e).scope, "public") == 0) {
+        entry->public_connect_seen = true;
+    }
+}
+
+static const struct flow_state_entry *flow_state_lookup(uint32_t root_pid, uint64_t now_ns) {
+    for (size_t i = 0; i < FLOW_STATE_ENTRIES; i++) {
+        struct flow_state_entry *entry = &flow_state[i];
+        if (flow_entry_expired(entry, now_ns)) {
+            memset(entry, 0, sizeof(*entry));
+            continue;
+        }
+        if (entry->active && entry->root_pid == root_pid) {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+static bool make_controlled_flow_finding(enum edr_severity default_severity,
+                                         const char *rule_id,
+                                         const char *reason,
+                                         uint32_t score,
+                                         const char *flow_reasons,
+                                         uint32_t flow_root,
+                                         struct edr_finding *finding) {
+    if (!make_controlled_finding(default_severity, rule_id, reason, finding)) {
+        return false;
+    }
+
+    finding->has_flow = true;
+    finding->flow_id = rule_id;
+    finding->flow_score = score;
+    finding->flow_reasons = flow_reasons;
+    finding->flow_window_seconds = FLOW_WINDOW_SECONDS;
+    finding->flow_root_pid = flow_root;
+    return true;
+}
+
+static bool evaluate_connect_flow(const struct edr_event *e,
+                                  const struct process_context *proc,
+                                  struct edr_finding *finding) {
+    if (e->type != EDR_EVENT_CONNECT ||
+        strcmp(classify_net_destination(e).scope, "public") != 0 ||
+        !is_transfer_command(e->comm, e->target)) {
+        return false;
+    }
+
+    uint32_t root_pid = flow_root_pid(e, proc);
+    const struct flow_state_entry *entry = flow_state_lookup(root_pid, e->timestamp_ns);
+    bool shell_context = process_tree_has_shell_context(e, proc) ||
+                         (entry && entry->shell_seen);
+
+    if (shell_context) {
+        if (make_controlled_flow_finding(
+                EDR_SEV_CRITICAL,
+                "flow.shell_downloader_public_net",
+                "shell-launched transfer tool connected to public network",
+                90,
+                "shell_context,transfer_tool,public_destination",
+                root_pid,
+                finding)) {
+            return true;
+        }
+    }
+
+    if (!proc->has_tty) {
+        return make_controlled_flow_finding(
+            EDR_SEV_WARN,
+            "flow.no_tty_public_transfer_tool",
+            "transfer tool without TTY connected to public network",
+            70,
+            "no_tty,transfer_tool,public_destination",
+            root_pid,
+            finding);
+    }
+
+    return false;
+}
+
 static bool is_suspicious_port(uint16_t port, enum edr_severity *severity,
                                const char **rule_id) {
     for (size_t i = rules.suspicious_port_count; i > 0; i--) {
@@ -1390,7 +1620,8 @@ static bool make_controlled_finding(enum edr_severity default_severity, const ch
     return true;
 }
 
-static struct edr_finding evaluate_event(const struct edr_event *e) {
+static struct edr_finding evaluate_event(const struct edr_event *e,
+                                         const struct process_context *proc) {
     enum edr_severity severity = EDR_SEV_INFO;
     const char *rule_id = NULL;
     struct edr_finding finding;
@@ -1438,6 +1669,10 @@ static struct edr_finding evaluate_event(const struct edr_event *e) {
         if (is_sensitive_read_file(e->target, &severity, &rule_id)) {
             return make_finding(severity, rule_id, "sensitive file access");
         }
+    }
+
+    if (evaluate_connect_flow(e, proc, &finding)) {
+        return finding;
     }
 
     if (e->type == EDR_EVENT_CONNECT && is_suspicious_port(event_dst_port(e), &severity, &rule_id)) {
@@ -1553,7 +1788,19 @@ static void write_jsonl(FILE *out, const struct edr_event *e,
     json_escape(out, finding->rule_id);
     fprintf(out, "\",\"reason\":\"");
     json_escape(out, finding->reason);
-    fprintf(out, "\"}\n");
+    if (finding->has_flow) {
+        fprintf(out, "\",\"flow_id\":\"");
+        json_escape(out, finding->flow_id);
+        fprintf(out, "\",\"flow_score\":%u,\"flow_reasons\":\"",
+                finding->flow_score);
+        json_escape(out, finding->flow_reasons);
+        fprintf(out,
+                "\",\"flow_window_seconds\":%u,\"flow_root_pid\":%u",
+                finding->flow_window_seconds, finding->flow_root_pid);
+        fprintf(out, "}\n");
+    } else {
+        fprintf(out, "\"}\n");
+    }
     fflush(out);
 }
 
@@ -1567,17 +1814,19 @@ static bool same_dedup_key(const struct dedup_entry *entry, const struct edr_eve
            entry->net_family == e->net_family &&
            entry->net_port == e->net_port &&
            entry->reason == finding->reason &&
+           entry->rule_id == finding->rule_id &&
+           entry->has_flow == finding->has_flow &&
+           entry->flow_root_pid == finding->flow_root_pid &&
            strncmp(entry->comm, e->comm, sizeof(entry->comm)) == 0 &&
            strncmp(entry->target, e->target, sizeof(entry->target)) == 0;
 }
 
 static void emit_finding(struct edr_options *opts, const struct edr_event *e,
+                         const struct process_context *proc,
                          const struct edr_finding *finding, uint32_t repeat_count) {
-    struct process_context proc;
     char line[MAX_EVENT_MESSAGE];
 
-    enrich_process(e->pid, &proc);
-    format_event(e, &proc, line, sizeof(line));
+    format_event(e, proc, line, sizeof(line));
     add_traffic(line);
 
     if (finding->severity > EDR_SEV_INFO) {
@@ -1595,7 +1844,7 @@ static void emit_finding(struct edr_options *opts, const struct edr_event *e,
     }
 
     if (opts) {
-        write_jsonl(opts->jsonl, e, &proc, finding, repeat_count);
+        write_jsonl(opts->jsonl, e, proc, finding, repeat_count);
     }
 }
 
@@ -1613,8 +1862,16 @@ static void emit_dedup_entry(struct edr_options *opts, struct dedup_entry *entry
         .severity = entry->severity,
         .rule_id = entry->rule_id,
         .reason = entry->reason,
+        .has_flow = entry->has_flow,
+        .flow_id = entry->flow_id,
+        .flow_score = entry->flow_score,
+        .flow_reasons = entry->flow_reasons,
+        .flow_window_seconds = entry->flow_window_seconds,
+        .flow_root_pid = entry->flow_root_pid,
     };
-    emit_finding(opts, &entry->event, &finding, entry->repeat_count);
+    struct process_context proc;
+    enrich_process(entry->event.pid, &proc);
+    emit_finding(opts, &entry->event, &proc, &finding, entry->repeat_count);
     clear_dedup_entry(entry);
 }
 
@@ -1650,6 +1907,12 @@ static bool suppress_duplicate(struct edr_options *opts, const struct edr_event 
     entry->reason = finding->reason;
     entry->rule_id = finding->rule_id;
     entry->severity = finding->severity;
+    entry->has_flow = finding->has_flow;
+    entry->flow_id = finding->flow_id;
+    entry->flow_score = finding->flow_score;
+    entry->flow_reasons = finding->flow_reasons;
+    entry->flow_window_seconds = finding->flow_window_seconds;
+    entry->flow_root_pid = finding->flow_root_pid;
     snprintf(entry->comm, sizeof(entry->comm), "%s", e->comm);
     snprintf(entry->target, sizeof(entry->target), "%s", e->target);
     return false;
@@ -1668,7 +1931,16 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     }
 
     struct edr_event *e = data;
-    struct edr_finding finding = evaluate_event(e);
+    struct process_context proc;
+    bool proc_enriched = false;
+    memset(&proc, 0, sizeof(proc));
+
+    if (e->type == EDR_EVENT_EXEC || e->type == EDR_EVENT_CONNECT) {
+        enrich_process(e->pid, &proc);
+        proc_enriched = true;
+        flow_state_observe_event(e, &proc);
+    }
+    struct edr_finding finding = evaluate_event(e, &proc);
 
     if (e->type == EDR_EVENT_EXEC) {
         g_telemetry.exec_events++;
@@ -1696,7 +1968,10 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         return 0;
     }
 
-    emit_finding(opts, e, &finding, 0);
+    if (!proc_enriched) {
+        enrich_process(e->pid, &proc);
+    }
+    emit_finding(opts, e, &proc, &finding, 0);
     return 0;
 }
 

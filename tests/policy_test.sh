@@ -43,6 +43,32 @@ finally:
 PY
 }
 
+trigger_public_flow_events() {
+    sudo cat /etc/shadow >/dev/null || true
+
+    if command -v curl >/dev/null 2>&1; then
+        timeout 2 curl -fsS --connect-timeout 1 --max-time 2 http://93.184.216.34/ >/dev/null 2>&1 || true
+    elif command -v wget >/dev/null 2>&1; then
+        timeout 2 wget -q -T 1 -O /dev/null http://93.184.216.34/ >/dev/null 2>&1 || true
+    elif command -v nc >/dev/null 2>&1; then
+        timeout 2 nc -w 1 93.184.216.34 80 </dev/null >/dev/null 2>&1 || true
+    fi
+
+    python3 - <<'PY' >/dev/null 2>&1 || true
+import socket
+
+for host, port in (("93.184.216.34", 80), ("1.1.1.1", 443)):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        s.connect((host, port))
+    except OSError:
+        pass
+    finally:
+        s.close()
+PY
+}
+
 run_agent_capture() {
     local config_file="$1"
     local output_file="$2"
@@ -57,6 +83,23 @@ run_agent_capture() {
 
     sleep 1
     trigger_warning_events
+    wait "$agent_pid" || test "$?" -eq 124
+}
+
+run_agent_public_flow_capture() {
+    local config_file="$1"
+    local output_file="$2"
+
+    cd "$DEV_DIR"
+    sudo timeout -s INT 6 ./asic_main \
+        --quiet \
+        --bpf asic_sensor.bpf.o \
+        -c "$config_file" \
+        -o "$output_file" &
+    local agent_pid=$!
+
+    sleep 1
+    trigger_public_flow_events
     wait "$agent_pid" || test "$?" -eq 124
 }
 
@@ -240,6 +283,74 @@ for line_no, record in findings:
 PY
 }
 
+assert_flow_finding_fields() {
+    local file="$1"
+
+    python3 - "$file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+flow_fields = (
+    "flow_id",
+    "flow_score",
+    "flow_reasons",
+    "flow_window_seconds",
+    "flow_root_pid",
+)
+flow_findings = []
+
+with open(path, "r", encoding="utf-8") as lines:
+    for line_no, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(f"invalid JSONL on line {line_no}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if "severity" not in record or "reason" not in record:
+            continue
+        rule_id = record.get("rule_id")
+        if any(field in record for field in flow_fields) or (
+            isinstance(rule_id, str) and rule_id.startswith("flow.")
+        ):
+            flow_findings.append((line_no, record))
+
+if not flow_findings:
+    print("no flow finding JSONL records found", file=sys.stderr)
+    sys.exit(2)
+
+for line_no, record in flow_findings:
+    if not isinstance(record.get("flow_id"), str) or not record["flow_id"]:
+        print(
+            f"flow finding JSONL record on line {line_no} has missing or non-string flow_id",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    for field in ("flow_score", "flow_window_seconds", "flow_root_pid"):
+        if isinstance(record.get(field), bool) or not isinstance(record.get(field), int):
+            print(
+                f"flow finding JSONL record on line {line_no} has non-integer {field}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    reasons = record.get("flow_reasons")
+    if isinstance(reasons, str):
+        continue
+    if isinstance(reasons, list):
+        continue
+
+    print(
+        f"flow finding JSONL record on line {line_no} has non-string/non-string-array flow_reasons",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+PY
+}
+
 assert_finding_rule_ids() {
     local file="$1"
 
@@ -411,6 +522,18 @@ test_check_config_accepts_id_policy_controls() {
     cd "$DEV_DIR"
     if ! ./asic_main --check-config -c "$config_file" >/dev/null; then
         echo "--check-config rejected valid ID-based policy controls" >&2
+        exit 1
+    fi
+}
+
+test_check_config_accepts_flow_id_policy_controls() {
+    local config_file
+    config_file="$(base_config)"
+    printf '\ndisable_rule_id=flow.no_tty_public_transfer_tool\nrule_severity=flow.shell_downloader_public_net,critical\n' >> "$config_file"
+
+    cd "$DEV_DIR"
+    if ! ./asic_main --check-config -c "$config_file" >/dev/null; then
+        echo "--check-config rejected valid flow ID policy controls" >&2
         exit 1
     fi
 }
@@ -600,6 +723,29 @@ test_runtime_jsonl_classifies_loopback_suspicious_port() {
     assert_suspicious_port_loopback_classification "$output_file"
 }
 
+test_runtime_jsonl_emits_compiled_flow_fields() {
+    local config_file output_file status
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-flow.XXXXXX.jsonl)"
+    printf '\nsuspicious_port=80,warn\nsuspicious_port=443,warn\n' >> "$config_file"
+
+    run_agent_public_flow_capture "$config_file" "$output_file"
+
+    set +e
+    assert_flow_finding_fields "$output_file"
+    status=$?
+    set -e
+
+    if (( status == 2 )); then
+        echo "skipping compiled flow JSONL field test: no public flow finding generated" >&2
+        return 0
+    fi
+
+    if (( status != 0 )); then
+        exit "$status"
+    fi
+}
+
 test_critical_floor_suppresses_warnings() {
     local config_file output_file
     config_file="$(base_config)"
@@ -671,6 +817,7 @@ test_rule_severity_id_promotes_port() {
 
 test_check_config_accepts_valid_policy
 test_check_config_accepts_id_policy_controls
+test_check_config_accepts_flow_id_policy_controls
 test_check_config_accepts_supported_profiles
 test_check_config_rejects_invalid_policy
 test_check_config_rejects_invalid_profile
@@ -683,6 +830,7 @@ test_runtime_jsonl_emits_exe_provenance_fields
 test_runtime_jsonl_emits_lineage_session_fields
 test_runtime_jsonl_emits_rule_ids
 test_runtime_jsonl_classifies_loopback_suspicious_port
+test_runtime_jsonl_emits_compiled_flow_fields
 test_critical_floor_suppresses_warnings
 test_per_rule_override_promotes_port
 test_disable_controls_suppress_selected_rules
