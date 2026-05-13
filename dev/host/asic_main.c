@@ -70,6 +70,11 @@ struct edr_rules {
     enum edr_severity suspicious_port_severity[MAX_RULES];
     char suspicious_port_rule_ids[MAX_RULES][MAX_RULE_ID];
     size_t suspicious_port_count;
+    char disabled_rule_ids[MAX_RULES][MAX_RULE_ID];
+    size_t disabled_rule_id_count;
+    char severity_override_rule_ids[MAX_RULES][MAX_RULE_ID];
+    enum edr_severity severity_override_values[MAX_RULES];
+    size_t severity_override_count;
     uint64_t dedup_window_ns;
     enum edr_severity min_severity;
 };
@@ -373,6 +378,81 @@ static bool valid_rule_id(const char *rule_id) {
     return true;
 }
 
+static bool add_disabled_rule_id(const char *rule_id) {
+    for (size_t i = 0; i < rules.disabled_rule_id_count; i++) {
+        if (strcmp(rules.disabled_rule_ids[i], rule_id) == 0) {
+            return true;
+        }
+    }
+    if (rules.disabled_rule_id_count >= MAX_RULES) {
+        return false;
+    }
+    snprintf(rules.disabled_rule_ids[rules.disabled_rule_id_count], MAX_RULE_ID, "%s", rule_id);
+    rules.disabled_rule_id_count++;
+    return true;
+}
+
+static bool add_rule_severity_override(const char *rule_id, enum edr_severity severity) {
+    for (size_t i = 0; i < rules.severity_override_count; i++) {
+        if (strcmp(rules.severity_override_rule_ids[i], rule_id) == 0) {
+            rules.severity_override_values[i] = severity;
+            return true;
+        }
+    }
+    if (rules.severity_override_count >= MAX_RULES) {
+        return false;
+    }
+    snprintf(rules.severity_override_rule_ids[rules.severity_override_count], MAX_RULE_ID, "%s", rule_id);
+    rules.severity_override_values[rules.severity_override_count] = severity;
+    rules.severity_override_count++;
+    return true;
+}
+
+static bool rule_id_disabled(const char *rule_id) {
+    for (size_t i = 0; i < rules.disabled_rule_id_count; i++) {
+        if (strcmp(rules.disabled_rule_ids[i], rule_id) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static enum edr_severity effective_rule_severity(const char *rule_id,
+                                                 enum edr_severity default_severity) {
+    for (size_t i = rules.severity_override_count; i > 0; i--) {
+        size_t idx = i - 1;
+        if (strcmp(rules.severity_override_rule_ids[idx], rule_id) == 0) {
+            return rules.severity_override_values[idx];
+        }
+    }
+    return default_severity;
+}
+
+static bool rule_controls_allow(const char *rule_id, enum edr_severity default_severity,
+                                enum edr_severity *severity) {
+    if (rule_id_disabled(rule_id)) {
+        return false;
+    }
+    *severity = effective_rule_severity(rule_id, default_severity);
+    return true;
+}
+
+static bool parse_rule_severity_control(char *raw_value, const char **rule_id,
+                                        enum edr_severity *severity) {
+    char *comma = strchr(raw_value, ',');
+    if (!comma) {
+        return false;
+    }
+    *comma = '\0';
+    char *id = trim(raw_value);
+    char *severity_value = trim(comma + 1);
+    if (!valid_rule_id(id) || !parse_severity(severity_value, severity)) {
+        return false;
+    }
+    *rule_id = id;
+    return true;
+}
+
 static bool split_rule_value(char *raw_value, enum edr_severity default_severity,
                              const char *default_rule_id, char **rule_value,
                              enum edr_severity *severity, const char **rule_id) {
@@ -403,6 +483,59 @@ static bool split_rule_value(char *raw_value, enum edr_severity default_severity
 
     *rule_value = trim(raw_value);
     return (*rule_value)[0] != '\0';
+}
+
+static bool rule_id_in_string_rules(char rule_ids[][MAX_RULE_ID], size_t count,
+                                    const char *rule_id) {
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(rule_ids[i], rule_id) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool known_rule_id(const char *rule_id) {
+    static const char *memory_rule_ids[] = {
+        "mem.rwx_mprotect",
+        "mem.exec_mprotect",
+        "mem.rwx_mmap",
+        "mem.anon_exec_mmap",
+    };
+
+    for (size_t i = 0; i < sizeof(memory_rule_ids) / sizeof(memory_rule_ids[0]); i++) {
+        if (strcmp(memory_rule_ids[i], rule_id) == 0) {
+            return true;
+        }
+    }
+    return rule_id_in_string_rules(rules.suspicious_exec_exact_rule_ids,
+                                   rules.suspicious_exec_exact_count, rule_id) ||
+           rule_id_in_string_rules(rules.suspicious_exec_prefix_rule_ids,
+                                   rules.suspicious_exec_prefix_count, rule_id) ||
+           rule_id_in_string_rules(rules.sensitive_read_rule_ids,
+                                   rules.sensitive_read_count, rule_id) ||
+           rule_id_in_string_rules(rules.sensitive_write_rule_ids,
+                                   rules.sensitive_write_count, rule_id) ||
+           rule_id_in_string_rules(rules.suspicious_port_rule_ids,
+                                   rules.suspicious_port_count, rule_id);
+}
+
+static bool validate_rule_id_controls(const char *path) {
+    bool valid = true;
+    for (size_t i = 0; i < rules.disabled_rule_id_count; i++) {
+        if (!known_rule_id(rules.disabled_rule_ids[i])) {
+            fprintf(stderr, "unknown disable_rule_id '%s' in %s\n", rules.disabled_rule_ids[i], path);
+            valid = false;
+        }
+    }
+    for (size_t i = 0; i < rules.severity_override_count; i++) {
+        if (!known_rule_id(rules.severity_override_rule_ids[i])) {
+            fprintf(stderr, "unknown rule_severity rule_id '%s' in %s\n",
+                    rules.severity_override_rule_ids[i], path);
+            valid = false;
+        }
+    }
+    return valid;
 }
 
 static void init_default_rules(void) {
@@ -611,6 +744,19 @@ static bool load_rules_file(const char *path, bool required) {
                 fprintf(stderr, "invalid disable_suspicious_port '%s' on line %u in %s\n", value, line_no, path);
                 valid = false;
             }
+        } else if (strcmp(key, "disable_rule_id") == 0) {
+            if (!valid_rule_id(value) || !add_disabled_rule_id(value)) {
+                fprintf(stderr, "invalid disable_rule_id '%s' on line %u in %s\n", value, line_no, path);
+                valid = false;
+            }
+        } else if (strcmp(key, "rule_severity") == 0) {
+            enum edr_severity severity = EDR_SEV_WARN;
+            const char *rule_id = NULL;
+            if (!parse_rule_severity_control(value, &rule_id, &severity) ||
+                !add_rule_severity_override(rule_id, severity)) {
+                fprintf(stderr, "invalid rule_severity on line %u in %s\n", line_no, path);
+                valid = false;
+            }
         } else if (strcmp(key, "dedup_window_seconds") == 0) {
             uint64_t seconds = 0;
             if (!parse_u64(value, &seconds) || seconds > UINT64_MAX / NS_PER_SECOND) {
@@ -634,7 +780,7 @@ static bool load_rules_file(const char *path, bool required) {
     }
 
     fclose(f);
-    return valid;
+    return valid && validate_rule_id_controls(path);
 }
 
 static void strip_newline(char *value) {
@@ -790,9 +936,10 @@ static bool contains_rule(const char *haystack, char ruleset[][EDR_MAX_TARGET],
     for (size_t i = rule_count; i > 0; i--) {
         size_t idx = i - 1;
         if (strstr(haystack, ruleset[idx]) != NULL) {
-            *severity = severities[idx];
-            *rule_id = rule_ids[idx];
-            return true;
+            if (rule_controls_allow(rule_ids[idx], severities[idx], severity)) {
+                *rule_id = rule_ids[idx];
+                return true;
+            }
         }
     }
     return false;
@@ -818,17 +965,21 @@ static bool is_suspicious_exec(const char *target, enum edr_severity *severity,
     for (size_t i = rules.suspicious_exec_exact_count; i > 0; i--) {
         size_t idx = i - 1;
         if (strcmp(base, rules.suspicious_exec_exact[idx]) == 0) {
-            *severity = rules.suspicious_exec_exact_severity[idx];
-            *rule_id = rules.suspicious_exec_exact_rule_ids[idx];
-            return true;
+            if (rule_controls_allow(rules.suspicious_exec_exact_rule_ids[idx],
+                                    rules.suspicious_exec_exact_severity[idx], severity)) {
+                *rule_id = rules.suspicious_exec_exact_rule_ids[idx];
+                return true;
+            }
         }
     }
     for (size_t i = rules.suspicious_exec_prefix_count; i > 0; i--) {
         size_t idx = i - 1;
         if (strncmp(base, rules.suspicious_exec_prefix[idx], strlen(rules.suspicious_exec_prefix[idx])) == 0) {
-            *severity = rules.suspicious_exec_prefix_severity[idx];
-            *rule_id = rules.suspicious_exec_prefix_rule_ids[idx];
-            return true;
+            if (rule_controls_allow(rules.suspicious_exec_prefix_rule_ids[idx],
+                                    rules.suspicious_exec_prefix_severity[idx], severity)) {
+                *rule_id = rules.suspicious_exec_prefix_rule_ids[idx];
+                return true;
+            }
         }
     }
 
@@ -863,9 +1014,11 @@ static bool is_suspicious_port(uint16_t port, enum edr_severity *severity,
     for (size_t i = rules.suspicious_port_count; i > 0; i--) {
         size_t idx = i - 1;
         if (rules.suspicious_ports[idx] == port) {
-            *severity = rules.suspicious_port_severity[idx];
-            *rule_id = rules.suspicious_port_rule_ids[idx];
-            return true;
+            if (rule_controls_allow(rules.suspicious_port_rule_ids[idx],
+                                    rules.suspicious_port_severity[idx], severity)) {
+                *rule_id = rules.suspicious_port_rule_ids[idx];
+                return true;
+            }
         }
     }
     return false;
@@ -899,9 +1052,20 @@ static struct edr_finding make_finding(enum edr_severity severity, const char *r
     };
 }
 
+static bool make_controlled_finding(enum edr_severity default_severity, const char *rule_id,
+                                    const char *reason, struct edr_finding *finding) {
+    enum edr_severity severity = default_severity;
+    if (!rule_controls_allow(rule_id, default_severity, &severity)) {
+        return false;
+    }
+    *finding = make_finding(severity, rule_id, reason);
+    return true;
+}
+
 static struct edr_finding evaluate_event(const struct edr_event *e) {
     enum edr_severity severity = EDR_SEV_INFO;
     const char *rule_id = NULL;
+    struct edr_finding finding;
 
     if (e->type == EDR_EVENT_EXEC && is_suspicious_exec(e->target, &severity, &rule_id)) {
         return make_finding(severity, rule_id, "suspicious process execution");
@@ -909,17 +1073,33 @@ static struct edr_finding evaluate_event(const struct edr_event *e) {
 
     if (e->type == EDR_EVENT_MPROTECT && (e->prot & PROT_EXEC) && !comm_allowed_for_jit(e->comm)) {
         if (e->prot & PROT_WRITE) {
-            return make_finding(EDR_SEV_CRITICAL, "mem.rwx_mprotect", "RWX memory request");
+            if (make_controlled_finding(EDR_SEV_CRITICAL, "mem.rwx_mprotect",
+                                        "RWX memory request", &finding)) {
+                return finding;
+            }
+            return make_finding(EDR_SEV_INFO, "event.observed", "observed");
         }
-        return make_finding(EDR_SEV_WARN, "mem.exec_mprotect", "mprotect executable memory request");
+        if (make_controlled_finding(EDR_SEV_WARN, "mem.exec_mprotect",
+                                    "mprotect executable memory request", &finding)) {
+            return finding;
+        }
+        return make_finding(EDR_SEV_INFO, "event.observed", "observed");
     }
 
     if (e->type == EDR_EVENT_MMAP && (e->prot & PROT_EXEC) && !comm_allowed_for_jit(e->comm)) {
         if (e->prot & PROT_WRITE) {
-            return make_finding(EDR_SEV_CRITICAL, "mem.rwx_mmap", "RWX memory mapping");
+            if (make_controlled_finding(EDR_SEV_CRITICAL, "mem.rwx_mmap",
+                                        "RWX memory mapping", &finding)) {
+                return finding;
+            }
+            return make_finding(EDR_SEV_INFO, "event.observed", "observed");
         }
         if (e->flags & MAP_ANONYMOUS) {
-            return make_finding(EDR_SEV_WARN, "mem.anon_exec_mmap", "anonymous executable memory mapping");
+            if (make_controlled_finding(EDR_SEV_WARN, "mem.anon_exec_mmap",
+                                        "anonymous executable memory mapping", &finding)) {
+                return finding;
+            }
+            return make_finding(EDR_SEV_INFO, "event.observed", "observed");
         }
     }
 

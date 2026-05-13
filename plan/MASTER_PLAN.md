@@ -26,6 +26,7 @@ Turn the repository into a focused endpoint detection and response agent instead
 18. Add startup policy summary output and JSONL summary records when `-o` is used.
 19. Add executable provenance metadata to JSONL findings: device, inode, mode, owner ids, mtime, deleted executable marker, and writable-path classification.
 20. Add stable `rule_id` values to JSONL findings for built-in process, memory, file, and network detections.
+21. Add ID-based policy controls with `disable_rule_id=<rule_id>` and `rule_severity=<rule_id>,<severity>`, including executable-memory rule IDs.
 
 ## Phase 1: Detection Quality
 

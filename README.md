@@ -111,19 +111,20 @@ The unit keeps the runtime filesystem mostly read-only and only grants write acc
 Default rules live in `config/rules.conf`. Installed systems read `/etc/asic-edr/rules.conf`.
 
 Detection rules accept either `key=value` or `key=value,severity`. Supported severities are `info`, `warn`, and `critical`; later duplicate rules override earlier duplicate severities.
-Built-in/default detection rules can be removed with `disable_<rule_key>=value`, for example `disable_suspicious_port=4444`.
+Built-in/default detection rules can be removed by value with `disable_<rule_key>=value`, for example `disable_suspicious_port=4444`, or by ID with `disable_rule_id=<rule_id>`.
+Any built-in/default rule severity can be overridden by ID with `rule_severity=<rule_id>,<severity>`.
 
-Stable finding `rule_id` values use the configured rule family for value-backed detections and fixed IDs for executable-memory detections:
+Stable finding `rule_id` values use the configured rule family for value-backed detections and fixed IDs for executable-memory detections. Memory rule IDs can be disabled or assigned severity by ID:
 
-- `suspicious_exec_exact`
-- `suspicious_exec_prefix`
-- `sensitive_read`
-- `sensitive_write`
-- `suspicious_port`
-- `memory_mprotect_exec`
-- `memory_mprotect_rwx`
-- `memory_mmap_exec_anon`
-- `memory_mmap_rwx`
+- `exec.suspicious_exact`
+- `exec.suspicious_prefix`
+- `file.sensitive_read`
+- `file.sensitive_write`
+- `net.suspicious_port`
+- `mem.exec_mprotect`
+- `mem.rwx_mprotect`
+- `mem.anon_exec_mmap`
+- `mem.rwx_mmap`
 
 Supported keys:
 
@@ -141,6 +142,8 @@ Supported keys:
 - `disable_sensitive_write`
 - `disable_jit_allow_comm`
 - `disable_suspicious_port`
+- `disable_rule_id`
+- `rule_severity`
 
 `dedup_window_seconds=0` disables suppression for diagnostic captures.
 `min_severity=critical` suppresses warning-level findings in normal mode; `--all-events` still emits raw telemetry.

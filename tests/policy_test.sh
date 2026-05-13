@@ -226,6 +226,40 @@ if port_4444_rule_ids and not all(
 PY
 }
 
+extract_finding_rule_id() {
+    local file="$1"
+    local selector="$2"
+
+    python3 - "$file" "$selector" <<'PY'
+import json
+import sys
+
+path, selector = sys.argv[1], sys.argv[2]
+
+with open(path, "r", encoding="utf-8") as lines:
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if selector == "shadow" and record.get("target") == "/etc/shadow":
+            rule_id = record.get("rule_id")
+        elif selector == "port_4444" and record.get("dst_port") == 4444:
+            rule_id = record.get("rule_id")
+        else:
+            continue
+
+        if isinstance(rule_id, str) and rule_id:
+            print(rule_id)
+            sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 test_check_config_accepts_valid_policy() {
     local config_file
     config_file="$(base_config)"
@@ -233,6 +267,18 @@ test_check_config_accepts_valid_policy() {
     cd "$DEV_DIR"
     if ! ./asic_main --check-config -c "$config_file" >/dev/null; then
         echo "--check-config rejected a valid policy" >&2
+        exit 1
+    fi
+}
+
+test_check_config_accepts_id_policy_controls() {
+    local config_file
+    config_file="$(base_config)"
+    printf '\ndisable_rule_id=file.sensitive_read\nrule_severity=net.suspicious_port,critical\n' >> "$config_file"
+
+    cd "$DEV_DIR"
+    if ! ./asic_main --check-config -c "$config_file" >/dev/null; then
+        echo "--check-config rejected valid ID-based policy controls" >&2
         exit 1
     fi
 }
@@ -251,6 +297,12 @@ test_check_config_rejects_invalid_policy() {
     printf 'unknown_key=value\n' > "$config_file"
     if ./asic_main --check-config -c "$config_file" >/dev/null 2>&1; then
         echo "--check-config accepted unknown key" >&2
+        exit 1
+    fi
+
+    printf 'rule_severity=net.suspicious_port,urgent\n' > "$config_file"
+    if ./asic_main --check-config -c "$config_file" >/dev/null 2>&1; then
+        echo "--check-config accepted invalid rule_severity severity" >&2
         exit 1
     fi
 }
@@ -343,7 +395,41 @@ test_disable_controls_suppress_selected_rules() {
     assert_absent '"dst_port":4444' "$output_file" "disabled suspicious_port still emitted"
 }
 
+test_disable_rule_id_suppresses_sensitive_read() {
+    local baseline_config baseline_output config_file output_file rule_id
+    baseline_config="$(base_config)"
+    baseline_output="$(new_output_path /tmp/asic-edr-policy-id-baseline.XXXXXX.jsonl)"
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-disable-rule-id.XXXXXX.jsonl)"
+
+    run_agent_capture "$baseline_config" "$baseline_output"
+    rule_id="$(extract_finding_rule_id "$baseline_output" shadow || printf 'file.sensitive_read')"
+    printf '\ndisable_rule_id=%s\n' "$rule_id" >> "$config_file"
+
+    run_agent_capture "$config_file" "$output_file"
+
+    assert_absent '"target":"/etc/shadow"' "$output_file" "disable_rule_id did not suppress sensitive-read finding"
+}
+
+test_rule_severity_id_promotes_port() {
+    local baseline_config baseline_output config_file output_file rule_id
+    baseline_config="$(base_config)"
+    baseline_output="$(new_output_path /tmp/asic-edr-policy-port-id-baseline.XXXXXX.jsonl)"
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-rule-severity-id.XXXXXX.jsonl)"
+
+    run_agent_capture "$baseline_config" "$baseline_output"
+    rule_id="$(extract_finding_rule_id "$baseline_output" port_4444 || printf 'net.suspicious_port')"
+    printf '\nmin_severity=critical\nrule_severity=%s,critical\n' "$rule_id" >> "$config_file"
+
+    run_agent_capture "$config_file" "$output_file"
+
+    assert_present '"dst_port":4444' "$output_file" "rule_severity ID override did not allow promoted suspicious-port finding"
+    assert_present '"dst_port":4444.*"severity":2' "$output_file" "rule_severity ID override did not promote suspicious-port finding to critical"
+}
+
 test_check_config_accepts_valid_policy
+test_check_config_accepts_id_policy_controls
 test_check_config_rejects_invalid_policy
 test_check_config_emits_policy_summary
 test_runtime_jsonl_emits_policy_summary
@@ -352,5 +438,7 @@ test_runtime_jsonl_emits_rule_ids
 test_critical_floor_suppresses_warnings
 test_per_rule_override_promotes_port
 test_disable_controls_suppress_selected_rules
+test_disable_rule_id_suppresses_sensitive_read
+test_rule_severity_id_promotes_port
 
 echo "policy test passed"
