@@ -27,6 +27,7 @@ Turn the repository into a focused endpoint detection and response agent instead
 19. Add executable provenance metadata to JSONL findings: device, inode, mode, owner ids, mtime, deleted executable marker, and writable-path classification.
 20. Add stable `rule_id` values to JSONL findings for built-in process, memory, file, and network detections.
 21. Add ID-based policy controls with `disable_rule_id=<rule_id>` and `rule_severity=<rule_id>,<severity>`, including executable-memory rule IDs.
+22. Add EDR rule profiles with `baseline`, `server`, `developer-workstation`, and `high-signal` built-in postures.
 
 ## Phase 1: Detection Quality
 
@@ -123,5 +124,6 @@ Objective: prevent regressions while the sensor grows.
 
 ## Next Implementation Slice
 
-1. Add rule groups/profiles.
-2. Apply profiles to built-in rule selection and policy validation.
+1. Add network context refinements.
+2. Classify loopback, private, and public destinations in JSONL findings.
+3. Add suspicious destination port groups.

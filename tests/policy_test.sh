@@ -91,6 +91,28 @@ assert_present() {
     fi
 }
 
+summary_value() {
+    local key="$1"
+    local file="$2"
+
+    python3 - "$key" "$file" <<'PY'
+import re
+import sys
+
+key, path = sys.argv[1], sys.argv[2]
+pattern = re.compile(r"(?:^|\s)" + re.escape(key) + r"=([^\s]+)")
+
+with open(path, "r", encoding="utf-8") as lines:
+    for line in lines:
+        match = pattern.search(line)
+        if match:
+            print(match.group(1))
+            sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
 assert_finding_exe_provenance_fields() {
     local file="$1"
 
@@ -283,6 +305,22 @@ test_check_config_accepts_id_policy_controls() {
     fi
 }
 
+test_check_config_accepts_supported_profiles() {
+    local config_file profile
+    local profiles=(baseline server developer-workstation high-signal)
+
+    cd "$DEV_DIR"
+    for profile in "${profiles[@]}"; do
+        config_file="$(base_config)"
+        printf '\nprofile=%s\n' "$profile" >> "$config_file"
+
+        if ! ./asic_main --check-config -c "$config_file" >/dev/null; then
+            echo "--check-config rejected supported profile: $profile" >&2
+            exit 1
+        fi
+    done
+}
+
 test_check_config_rejects_invalid_policy() {
     local config_file
     config_file="$(new_tmp /tmp/asic-edr-policy-invalid.XXXXXX)"
@@ -303,6 +341,18 @@ test_check_config_rejects_invalid_policy() {
     printf 'rule_severity=net.suspicious_port,urgent\n' > "$config_file"
     if ./asic_main --check-config -c "$config_file" >/dev/null 2>&1; then
         echo "--check-config accepted invalid rule_severity severity" >&2
+        exit 1
+    fi
+}
+
+test_check_config_rejects_invalid_profile() {
+    local config_file
+    config_file="$(base_config)"
+    printf '\nprofile=everything\n' >> "$config_file"
+
+    cd "$DEV_DIR"
+    if ./asic_main --check-config -c "$config_file" >/dev/null 2>&1; then
+        echo "--check-config accepted invalid profile" >&2
         exit 1
     fi
 }
@@ -329,6 +379,22 @@ test_check_config_emits_policy_summary() {
     assert_present 'dedup_window_seconds=' "$summary_file" "--check-config summary missing dedup_window_seconds"
 }
 
+test_check_config_summary_emits_profile() {
+    local config_file summary_file
+    config_file="$(base_config)"
+    summary_file="$(new_tmp /tmp/asic-edr-policy-profile-summary.XXXXXX)"
+    printf '\nprofile=server\n' >> "$config_file"
+
+    cd "$DEV_DIR"
+    if ! ./asic_main --check-config -c "$config_file" > "$summary_file"; then
+        echo "--check-config rejected a valid profile while emitting summary" >&2
+        cat "$summary_file" >&2 || true
+        exit 1
+    fi
+
+    assert_present 'profile=server' "$summary_file" "--check-config summary missing selected profile"
+}
+
 test_runtime_jsonl_emits_policy_summary() {
     local config_file output_file
     config_file="$(base_config)"
@@ -337,6 +403,51 @@ test_runtime_jsonl_emits_policy_summary() {
     run_agent_capture "$config_file" "$output_file"
 
     assert_present '"record":"policy_summary"' "$output_file" "missing startup policy_summary JSONL record"
+}
+
+test_runtime_jsonl_emits_policy_profile() {
+    local config_file output_file
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-profile-startup.XXXXXX.jsonl)"
+    printf '\nprofile=developer-workstation\n' >> "$config_file"
+
+    run_agent_capture "$config_file" "$output_file"
+
+    assert_present '"record":"policy_summary"' "$output_file" "missing startup policy_summary JSONL record"
+    assert_present '"profile":"developer-workstation"' "$output_file" "policy_summary JSONL missing selected profile"
+}
+
+test_high_signal_profile_suppresses_shell_exec_defaults() {
+    local baseline_config baseline_summary high_signal_config high_signal_summary
+    local baseline_exec_exact high_signal_exec_exact
+    baseline_config="$(base_config)"
+    baseline_summary="$(new_tmp /tmp/asic-edr-policy-baseline-profile.XXXXXX)"
+    high_signal_config="$(base_config)"
+    high_signal_summary="$(new_tmp /tmp/asic-edr-policy-high-signal-profile.XXXXXX)"
+    printf '\nprofile=baseline\n' >> "$baseline_config"
+    printf '\nprofile=high-signal\n' >> "$high_signal_config"
+
+    cd "$DEV_DIR"
+    if ! ./asic_main --check-config -c "$baseline_config" > "$baseline_summary"; then
+        echo "--check-config rejected baseline profile while emitting summary" >&2
+        cat "$baseline_summary" >&2 || true
+        exit 1
+    fi
+    if ! ./asic_main --check-config -c "$high_signal_config" > "$high_signal_summary"; then
+        echo "--check-config rejected high-signal profile while emitting summary" >&2
+        cat "$high_signal_summary" >&2 || true
+        exit 1
+    fi
+
+    baseline_exec_exact="$(summary_value exec_exact "$baseline_summary")"
+    high_signal_exec_exact="$(summary_value exec_exact "$high_signal_summary")"
+
+    if (( baseline_exec_exact - high_signal_exec_exact < 2 )); then
+        echo "high-signal profile did not suppress noisy shell exec defaults relative to baseline" >&2
+        echo "baseline exec_exact=$baseline_exec_exact" >&2
+        echo "high-signal exec_exact=$high_signal_exec_exact" >&2
+        exit 1
+    fi
 }
 
 test_runtime_jsonl_emits_exe_provenance_fields() {
@@ -430,9 +541,14 @@ test_rule_severity_id_promotes_port() {
 
 test_check_config_accepts_valid_policy
 test_check_config_accepts_id_policy_controls
+test_check_config_accepts_supported_profiles
 test_check_config_rejects_invalid_policy
+test_check_config_rejects_invalid_profile
 test_check_config_emits_policy_summary
+test_check_config_summary_emits_profile
 test_runtime_jsonl_emits_policy_summary
+test_runtime_jsonl_emits_policy_profile
+test_high_signal_profile_suppresses_shell_exec_defaults
 test_runtime_jsonl_emits_exe_provenance_fields
 test_runtime_jsonl_emits_rule_ids
 test_critical_floor_suppresses_warnings

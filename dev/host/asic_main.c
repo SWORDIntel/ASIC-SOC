@@ -32,6 +32,13 @@ enum edr_severity {
     EDR_SEV_CRITICAL = 2,
 };
 
+enum edr_profile {
+    EDR_PROFILE_BASELINE = 0,
+    EDR_PROFILE_SERVER,
+    EDR_PROFILE_DEVELOPER_WORKSTATION,
+    EDR_PROFILE_HIGH_SIGNAL,
+};
+
 struct edr_finding {
     enum edr_severity severity;
     const char *rule_id;
@@ -48,6 +55,8 @@ struct edr_options {
 };
 
 struct edr_rules {
+    enum edr_profile profile;
+    const char *profile_name;
     char suspicious_exec_exact[MAX_RULES][64];
     enum edr_severity suspicious_exec_exact_severity[MAX_RULES];
     char suspicious_exec_exact_rule_ids[MAX_RULES][MAX_RULE_ID];
@@ -77,9 +86,11 @@ struct edr_rules {
     size_t severity_override_count;
     uint64_t dedup_window_ns;
     enum edr_severity min_severity;
+    enum edr_severity anon_exec_mmap_severity;
 };
 
 struct policy_summary {
+    const char *profile_name;
     size_t suspicious_exec_exact_count;
     size_t suspicious_exec_prefix_count;
     size_t sensitive_read_count;
@@ -137,6 +148,7 @@ static void sig_handler(int sig) {
 }
 
 static char *trim(char *value);
+static void json_escape(FILE *out, const char *value);
 
 static bool add_rule_value(char values[][64], enum edr_severity severities[],
                            char rule_ids[][MAX_RULE_ID], size_t *count,
@@ -310,6 +322,7 @@ static bool add_path_rule(char values[][EDR_MAX_TARGET], enum edr_severity sever
 
 static struct policy_summary current_policy_summary(void) {
     return (struct policy_summary){
+        .profile_name = rules.profile_name,
         .suspicious_exec_exact_count = rules.suspicious_exec_exact_count,
         .suspicious_exec_prefix_count = rules.suspicious_exec_prefix_count,
         .sensitive_read_count = rules.sensitive_read_count,
@@ -328,8 +341,9 @@ static void write_policy_summary_console(FILE *out, const struct policy_summary 
     }
 
     fprintf(out,
-            "%sexec_exact=%zu exec_prefix=%zu sensitive_read=%zu sensitive_write=%zu jit_allow=%zu suspicious_ports=%zu min_severity=%d dedup_window_seconds=%llu\n",
+            "%sprofile=%s exec_exact=%zu exec_prefix=%zu sensitive_read=%zu sensitive_write=%zu jit_allow=%zu suspicious_ports=%zu min_severity=%d dedup_window_seconds=%llu\n",
             prefix ? prefix : "",
+            summary->profile_name ? summary->profile_name : "baseline",
             summary->suspicious_exec_exact_count,
             summary->suspicious_exec_prefix_count,
             summary->sensitive_read_count,
@@ -346,10 +360,13 @@ static void write_policy_summary_jsonl(FILE *out, const struct policy_summary *s
     }
 
     fprintf(out,
-            "{\"record\":\"policy_summary\",\"version\":\"%s\",\"exec_exact\":%zu,\"exec_prefix\":%zu,"
+            "{\"record\":\"policy_summary\",\"version\":\"%s\",\"profile\":\"",
+            ASIC_EDR_VERSION);
+    json_escape(out, summary->profile_name ? summary->profile_name : "baseline");
+    fprintf(out,
+            "\",\"exec_exact\":%zu,\"exec_prefix\":%zu,"
             "\"sensitive_read\":%zu,\"sensitive_write\":%zu,\"jit_allow\":%zu,"
             "\"suspicious_ports\":%zu,\"min_severity\":%d,\"dedup_window_seconds\":%llu}\n",
-            ASIC_EDR_VERSION,
             summary->suspicious_exec_exact_count,
             summary->suspicious_exec_prefix_count,
             summary->sensitive_read_count,
@@ -538,10 +555,95 @@ static bool validate_rule_id_controls(const char *path) {
     return valid;
 }
 
+static const char *profile_name(enum edr_profile profile) {
+    switch (profile) {
+    case EDR_PROFILE_BASELINE:
+        return "baseline";
+    case EDR_PROFILE_SERVER:
+        return "server";
+    case EDR_PROFILE_DEVELOPER_WORKSTATION:
+        return "developer-workstation";
+    case EDR_PROFILE_HIGH_SIGNAL:
+        return "high-signal";
+    }
+    return "baseline";
+}
+
+static bool parse_profile(const char *value, enum edr_profile *profile) {
+    if (strcmp(value, "baseline") == 0) {
+        *profile = EDR_PROFILE_BASELINE;
+        return true;
+    }
+    if (strcmp(value, "server") == 0) {
+        *profile = EDR_PROFILE_SERVER;
+        return true;
+    }
+    if (strcmp(value, "developer-workstation") == 0) {
+        *profile = EDR_PROFILE_DEVELOPER_WORKSTATION;
+        return true;
+    }
+    if (strcmp(value, "high-signal") == 0) {
+        *profile = EDR_PROFILE_HIGH_SIGNAL;
+        return true;
+    }
+    return false;
+}
+
+static bool string_rule_present(char values[][64], size_t count, const char *value) {
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(values[i], value) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool add_profile_exec_exact_if_missing(const char *value) {
+    if (string_rule_present(rules.suspicious_exec_exact,
+                            rules.suspicious_exec_exact_count, value)) {
+        return true;
+    }
+    return add_rule_value(rules.suspicious_exec_exact, rules.suspicious_exec_exact_severity,
+                          rules.suspicious_exec_exact_rule_ids,
+                          &rules.suspicious_exec_exact_count, MAX_RULES,
+                          value, EDR_SEV_WARN, "exec.suspicious_exact");
+}
+
+static bool apply_profile(enum edr_profile profile) {
+    rules.profile = profile;
+    rules.profile_name = profile_name(profile);
+
+    switch (profile) {
+    case EDR_PROFILE_BASELINE:
+        return true;
+    case EDR_PROFILE_SERVER:
+        remove_comm_rule(rules.jit_allow_comm, &rules.jit_allow_comm_count, "chrome");
+        remove_comm_rule(rules.jit_allow_comm, &rules.jit_allow_comm_count, "chromium");
+        remove_comm_rule(rules.jit_allow_comm, &rules.jit_allow_comm_count, "firefox");
+        return add_profile_exec_exact_if_missing("curl") &&
+               add_profile_exec_exact_if_missing("wget");
+    case EDR_PROFILE_DEVELOPER_WORKSTATION:
+        rules.anon_exec_mmap_severity = EDR_SEV_INFO;
+        return true;
+    case EDR_PROFILE_HIGH_SIGNAL:
+        remove_rule_value(rules.suspicious_exec_exact, rules.suspicious_exec_exact_severity,
+                          rules.suspicious_exec_exact_rule_ids,
+                          &rules.suspicious_exec_exact_count, "bash");
+        remove_rule_value(rules.suspicious_exec_exact, rules.suspicious_exec_exact_severity,
+                          rules.suspicious_exec_exact_rule_ids,
+                          &rules.suspicious_exec_exact_count, "sh");
+        return true;
+    }
+    return false;
+}
+
 static void init_default_rules(void) {
     memset(&rules, 0, sizeof(rules));
+    rules.profile = EDR_PROFILE_BASELINE;
+    rules.profile_name = profile_name(EDR_PROFILE_BASELINE);
     rules.dedup_window_ns = DEFAULT_DEDUP_WINDOW_SECONDS * NS_PER_SECOND;
     rules.min_severity = EDR_SEV_WARN;
+    rules.anon_exec_mmap_severity = EDR_SEV_WARN;
 
     const char *exec_exact[] = {
         "bash", "sh", "dash", "zsh", "curl", "wget", "nc", "ncat", "socat", "pkexec", "sudo",
@@ -605,6 +707,45 @@ static char *trim(char *value) {
     return value;
 }
 
+static bool select_profile_from_file(FILE *f, const char *path) {
+    char line[512];
+    unsigned int line_no = 0;
+    enum edr_profile selected = EDR_PROFILE_BASELINE;
+    bool valid = true;
+
+    while (fgets(line, sizeof(line), f)) {
+        line_no++;
+        char *entry = trim(line);
+        if (entry[0] == '\0' || entry[0] == '#') {
+            continue;
+        }
+
+        char *eq = strchr(entry, '=');
+        if (!eq) {
+            continue;
+        }
+        *eq = '\0';
+        char *key = trim(entry);
+        char *value = trim(eq + 1);
+        if (strcmp(key, "profile") != 0) {
+            continue;
+        }
+        if (!parse_profile(value, &selected)) {
+            fprintf(stderr,
+                    "invalid profile '%s' on line %u in %s; supported profiles: baseline, server, developer-workstation, high-signal\n",
+                    value, line_no, path);
+            valid = false;
+        }
+    }
+
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "failed to rewind config %s: %s\n", path, strerror(errno));
+        return false;
+    }
+
+    return valid && apply_profile(selected);
+}
+
 static bool load_rules_file(const char *path, bool required) {
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -613,6 +754,11 @@ static bool load_rules_file(const char *path, bool required) {
             return false;
         }
         return true;
+    }
+
+    if (!select_profile_from_file(f, path)) {
+        fclose(f);
+        return false;
     }
 
     char line[512];
@@ -634,6 +780,9 @@ static bool load_rules_file(const char *path, bool required) {
         *eq = '\0';
         char *key = trim(entry);
         char *value = trim(eq + 1);
+        if (strcmp(key, "profile") == 0) {
+            continue;
+        }
         if (value[0] == '\0') {
             continue;
         }
@@ -1095,7 +1244,7 @@ static struct edr_finding evaluate_event(const struct edr_event *e) {
             return make_finding(EDR_SEV_INFO, "event.observed", "observed");
         }
         if (e->flags & MAP_ANONYMOUS) {
-            if (make_controlled_finding(EDR_SEV_WARN, "mem.anon_exec_mmap",
+            if (make_controlled_finding(rules.anon_exec_mmap_severity, "mem.anon_exec_mmap",
                                         "anonymous executable memory mapping", &finding)) {
                 return finding;
             }

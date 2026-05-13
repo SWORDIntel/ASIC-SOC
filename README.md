@@ -108,7 +108,10 @@ The unit keeps the runtime filesystem mostly read-only and only grants write acc
 
 ## Rules
 
-Default rules live in `config/rules.conf`. Installed systems read `/etc/asic-edr/rules.conf`.
+Built-in defaults are compiled into the daemon and selected by policy profile. Local policy lives in `config/rules.conf`; installed systems read `/etc/asic-edr/rules.conf`.
+
+Rule profiles select the built-in/default rule posture with `profile=<baseline|server|developer-workstation|high-signal>`. `baseline` preserves the default rule set, `server` trims workstation JIT allowances while keeping server-side process/network signal, `developer-workstation` keeps developer/browser/JVM JIT allowances, and `high-signal` suppresses noisy shell execution defaults while retaining higher-signal file, network, and executable-memory detections.
+Explicit config entries, `disable_<rule_key>`, `disable_rule_id`, and `rule_severity` apply on top of the selected profile.
 
 Detection rules accept either `key=value` or `key=value,severity`. Supported severities are `info`, `warn`, and `critical`; later duplicate rules override earlier duplicate severities.
 Built-in/default detection rules can be removed by value with `disable_<rule_key>=value`, for example `disable_suspicious_port=4444`, or by ID with `disable_rule_id=<rule_id>`.
@@ -130,6 +133,7 @@ Supported keys:
 
 - `dedup_window_seconds`
 - `min_severity`
+- `profile`
 - `suspicious_exec_exact`
 - `suspicious_exec_prefix`
 - `sensitive_read`
