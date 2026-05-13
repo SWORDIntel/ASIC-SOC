@@ -8,8 +8,9 @@
 - Validation: `--check-config` validates policy files without loading eBPF.
 - JSONL export: optional finding stream for local spool, journald/SIEM collection, replay tooling, and future QIHSE forwarding.
 - Replay validator: local/offline JSONL validator and normalizer for one or more spool files.
+- QIHSE dry-run forwarder: optional/offline batch and checkpoint tool for validated JSONL records.
 - Raw telemetry: `--all-events` for short diagnostic captures.
-- Tests: `make test-smoke`, `make test-policy`, `make test-replay`, and `make test-ops`.
+- Tests: `make test-smoke`, `make test-policy`, `make test-replay`, `make test-qihse-forwarder`, and `make test-ops`.
 - Ops scaffolding: hardened systemd service and logrotate configuration.
 
 ## JSONL Record Types
@@ -93,9 +94,11 @@ QIHSE is planned as an optional forwarder/importer target for historical analyti
 
 The replay validator runs outside the daemon hot path. It can validate one or more JSONL files, fail strictly on schema drift or unknown records when requested, and emit normalized dry-run JSONL for downstream importer or forwarder checks.
 
+The QIHSE forwarder is dry-run only. It validates records, emits compact `qihse_batch_dry_run` payloads, and supports checkpoint/resume without live network submission.
+
 ## Near-Term Work
 
-1. Add profile-specific behavioral flow thresholds and default enablement.
-2. Add QIHSE forwarder dry-run batching design.
+1. Add quarantine handling and retry/backpressure specs for optional forwarding.
+2. Add profile-aware flow allowlists and negative scoring.
 3. Add Debian packaging metadata.
-4. Add offset checkpoint and retry/backpressure specs for optional forwarding.
+4. Add saved analytics query sketches for QIHSE import.

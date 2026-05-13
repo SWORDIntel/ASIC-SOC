@@ -27,6 +27,9 @@
 #define FLOW_STATE_ENTRIES 256
 #define FLOW_WINDOW_SECONDS 120U
 #define JSONL_SCHEMA_VERSION "1"
+#define FLOW_RULE_SHELL_DOWNLOADER_PUBLIC_NET "flow.shell_downloader_public_net"
+#define FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL "flow.no_tty_public_transfer_tool"
+#define FLOW_RULE_SENSITIVE_READ_THEN_PUBLIC_NET "flow.sensitive_read_then_public_net"
 
 static volatile sig_atomic_t stop = 0;
 static struct bpf_link *links[5];
@@ -110,6 +113,12 @@ struct policy_summary {
     size_t suspicious_port_count;
     enum edr_severity min_severity;
     uint64_t dedup_window_seconds;
+    enum edr_severity flow_sensitive_read_then_public_net_severity;
+    uint32_t flow_sensitive_read_then_public_net_score;
+    enum edr_severity flow_shell_downloader_public_net_severity;
+    uint32_t flow_shell_downloader_public_net_score;
+    enum edr_severity flow_no_tty_public_transfer_tool_severity;
+    uint32_t flow_no_tty_public_transfer_tool_score;
 };
 
 struct agent_metadata {
@@ -197,6 +206,8 @@ static char *trim(char *value);
 static void json_escape(FILE *out, const char *value);
 static bool make_controlled_finding(enum edr_severity default_severity, const char *rule_id,
                                     const char *reason, struct edr_finding *finding);
+static enum edr_severity compiled_flow_rule_severity(const char *rule_id);
+static uint32_t default_flow_rule_score(const char *rule_id, bool suspicious_context);
 
 static bool add_rule_value(char values[][64], enum edr_severity severities[],
                            char rule_ids[][MAX_RULE_ID], size_t *count,
@@ -379,6 +390,18 @@ static struct policy_summary current_policy_summary(void) {
         .suspicious_port_count = rules.suspicious_port_count,
         .min_severity = rules.min_severity,
         .dedup_window_seconds = rules.dedup_window_ns / NS_PER_SECOND,
+        .flow_sensitive_read_then_public_net_severity =
+            compiled_flow_rule_severity(FLOW_RULE_SENSITIVE_READ_THEN_PUBLIC_NET),
+        .flow_sensitive_read_then_public_net_score =
+            default_flow_rule_score(FLOW_RULE_SENSITIVE_READ_THEN_PUBLIC_NET, false),
+        .flow_shell_downloader_public_net_severity =
+            compiled_flow_rule_severity(FLOW_RULE_SHELL_DOWNLOADER_PUBLIC_NET),
+        .flow_shell_downloader_public_net_score =
+            default_flow_rule_score(FLOW_RULE_SHELL_DOWNLOADER_PUBLIC_NET, false),
+        .flow_no_tty_public_transfer_tool_severity =
+            compiled_flow_rule_severity(FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL),
+        .flow_no_tty_public_transfer_tool_score =
+            default_flow_rule_score(FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL, false),
     };
 }
 
@@ -491,7 +514,7 @@ static void write_policy_summary_console(FILE *out, const struct policy_summary 
     }
 
     fprintf(out,
-            "%sprofile=%s exec_exact=%zu exec_prefix=%zu sensitive_read=%zu sensitive_write=%zu jit_allow=%zu suspicious_ports=%zu min_severity=%d dedup_window_seconds=%llu\n",
+            "%sprofile=%s exec_exact=%zu exec_prefix=%zu sensitive_read=%zu sensitive_write=%zu jit_allow=%zu suspicious_ports=%zu min_severity=%d dedup_window_seconds=%llu flow_sensitive_read_then_public_net_severity=%d flow_sensitive_read_then_public_net_score=%u flow_shell_downloader_public_net_severity=%d flow_shell_downloader_public_net_score=%u flow_no_tty_public_transfer_tool_severity=%d flow_no_tty_public_transfer_tool_score=%u\n",
             prefix ? prefix : "",
             summary->profile_name ? summary->profile_name : "baseline",
             summary->suspicious_exec_exact_count,
@@ -501,7 +524,13 @@ static void write_policy_summary_console(FILE *out, const struct policy_summary 
             summary->jit_allow_comm_count,
             summary->suspicious_port_count,
             summary->min_severity,
-            (unsigned long long)summary->dedup_window_seconds);
+            (unsigned long long)summary->dedup_window_seconds,
+            summary->flow_sensitive_read_then_public_net_severity,
+            summary->flow_sensitive_read_then_public_net_score,
+            summary->flow_shell_downloader_public_net_severity,
+            summary->flow_shell_downloader_public_net_score,
+            summary->flow_no_tty_public_transfer_tool_severity,
+            summary->flow_no_tty_public_transfer_tool_score);
 }
 
 static void write_policy_summary_jsonl(FILE *out, const struct policy_summary *summary) {
@@ -516,7 +545,13 @@ static void write_policy_summary_jsonl(FILE *out, const struct policy_summary *s
     fprintf(out,
             "\",\"exec_exact\":%zu,\"exec_prefix\":%zu,"
             "\"sensitive_read\":%zu,\"sensitive_write\":%zu,\"jit_allow\":%zu,"
-            "\"suspicious_ports\":%zu,\"min_severity\":%d,\"dedup_window_seconds\":%llu}\n",
+            "\"suspicious_ports\":%zu,\"min_severity\":%d,\"dedup_window_seconds\":%llu,"
+            "\"flow_sensitive_read_then_public_net_severity\":%d,"
+            "\"flow_sensitive_read_then_public_net_score\":%u,"
+            "\"flow_shell_downloader_public_net_severity\":%d,"
+            "\"flow_shell_downloader_public_net_score\":%u,"
+            "\"flow_no_tty_public_transfer_tool_severity\":%d,"
+            "\"flow_no_tty_public_transfer_tool_score\":%u}\n",
             summary->suspicious_exec_exact_count,
             summary->suspicious_exec_prefix_count,
             summary->sensitive_read_count,
@@ -524,7 +559,13 @@ static void write_policy_summary_jsonl(FILE *out, const struct policy_summary *s
             summary->jit_allow_comm_count,
             summary->suspicious_port_count,
             summary->min_severity,
-            (unsigned long long)summary->dedup_window_seconds);
+            (unsigned long long)summary->dedup_window_seconds,
+            summary->flow_sensitive_read_then_public_net_severity,
+            summary->flow_sensitive_read_then_public_net_score,
+            summary->flow_shell_downloader_public_net_severity,
+            summary->flow_shell_downloader_public_net_score,
+            summary->flow_no_tty_public_transfer_tool_severity,
+            summary->flow_no_tty_public_transfer_tool_score);
     fflush(out);
 }
 
@@ -593,6 +634,52 @@ static enum edr_severity effective_rule_severity(const char *rule_id,
         }
     }
     return default_severity;
+}
+
+static enum edr_severity default_flow_rule_severity(const char *rule_id) {
+    if (strcmp(rule_id, FLOW_RULE_SENSITIVE_READ_THEN_PUBLIC_NET) == 0) {
+        return EDR_SEV_CRITICAL;
+    }
+    if (strcmp(rule_id, FLOW_RULE_SHELL_DOWNLOADER_PUBLIC_NET) == 0) {
+        return EDR_SEV_CRITICAL;
+    }
+    if (strcmp(rule_id, FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL) == 0) {
+        switch (rules.profile) {
+        case EDR_PROFILE_SERVER:
+        case EDR_PROFILE_HIGH_SIGNAL:
+            return EDR_SEV_CRITICAL;
+        case EDR_PROFILE_DEVELOPER_WORKSTATION:
+            return EDR_SEV_INFO;
+        case EDR_PROFILE_BASELINE:
+            return EDR_SEV_WARN;
+        }
+    }
+    return EDR_SEV_WARN;
+}
+
+static enum edr_severity compiled_flow_rule_severity(const char *rule_id) {
+    return effective_rule_severity(rule_id, default_flow_rule_severity(rule_id));
+}
+
+static uint32_t default_flow_rule_score(const char *rule_id, bool suspicious_context) {
+    if (strcmp(rule_id, FLOW_RULE_SENSITIVE_READ_THEN_PUBLIC_NET) == 0) {
+        return suspicious_context ? 95U : 90U;
+    }
+    if (strcmp(rule_id, FLOW_RULE_SHELL_DOWNLOADER_PUBLIC_NET) == 0) {
+        return 90U;
+    }
+    if (strcmp(rule_id, FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL) == 0) {
+        switch (rules.profile) {
+        case EDR_PROFILE_SERVER:
+        case EDR_PROFILE_HIGH_SIGNAL:
+            return 90U;
+        case EDR_PROFILE_DEVELOPER_WORKSTATION:
+            return 40U;
+        case EDR_PROFILE_BASELINE:
+            return 70U;
+        }
+    }
+    return 0U;
 }
 
 static bool rule_controls_allow(const char *rule_id, enum edr_severity default_severity,
@@ -680,9 +767,9 @@ static bool known_rule_id(const char *rule_id) {
         "mem.anon_exec_mmap",
     };
     static const char *flow_rule_ids[] = {
-        "flow.shell_downloader_public_net",
-        "flow.no_tty_public_transfer_tool",
-        "flow.sensitive_read_then_public_net",
+        FLOW_RULE_SHELL_DOWNLOADER_PUBLIC_NET,
+        FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL,
+        FLOW_RULE_SENSITIVE_READ_THEN_PUBLIC_NET,
     };
 
     for (size_t i = 0; i < sizeof(memory_rule_ids) / sizeof(memory_rule_ids[0]); i++) {
@@ -1678,15 +1765,16 @@ static bool evaluate_connect_flow(const struct edr_event *e,
     bool sensitive_read_context = entry && entry->sensitive_read_seen;
 
     if (sensitive_read_context) {
-        uint32_t score = 90;
+        bool suspicious_context = shell_context || !proc->has_tty;
+        uint32_t score = default_flow_rule_score(FLOW_RULE_SENSITIVE_READ_THEN_PUBLIC_NET,
+                                                 suspicious_context);
         const char *reasons = "sensitive_read,transfer_tool,public_destination";
-        if (shell_context || !proc->has_tty) {
-            score = 95;
+        if (suspicious_context) {
             reasons = "sensitive_read,transfer_tool,public_destination,suspicious_context";
         }
         if (make_controlled_flow_finding(
-                EDR_SEV_CRITICAL,
-                "flow.sensitive_read_then_public_net",
+                default_flow_rule_severity(FLOW_RULE_SENSITIVE_READ_THEN_PUBLIC_NET),
+                FLOW_RULE_SENSITIVE_READ_THEN_PUBLIC_NET,
                 "sensitive file access followed by public network transfer",
                 score,
                 reasons,
@@ -1698,10 +1786,10 @@ static bool evaluate_connect_flow(const struct edr_event *e,
 
     if (shell_context) {
         if (make_controlled_flow_finding(
-                EDR_SEV_CRITICAL,
-                "flow.shell_downloader_public_net",
+                default_flow_rule_severity(FLOW_RULE_SHELL_DOWNLOADER_PUBLIC_NET),
+                FLOW_RULE_SHELL_DOWNLOADER_PUBLIC_NET,
                 "shell-launched transfer tool connected to public network",
-                90,
+                default_flow_rule_score(FLOW_RULE_SHELL_DOWNLOADER_PUBLIC_NET, false),
                 "shell_context,transfer_tool,public_destination",
                 root_pid,
                 finding)) {
@@ -1711,10 +1799,10 @@ static bool evaluate_connect_flow(const struct edr_event *e,
 
     if (!proc->has_tty) {
         return make_controlled_flow_finding(
-            EDR_SEV_WARN,
-            "flow.no_tty_public_transfer_tool",
+            default_flow_rule_severity(FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL),
+            FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL,
             "transfer tool without TTY connected to public network",
-            70,
+            default_flow_rule_score(FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL, false),
             "no_tty,transfer_tool,public_destination",
             root_pid,
             finding);

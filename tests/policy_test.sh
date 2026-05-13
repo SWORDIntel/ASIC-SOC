@@ -698,6 +698,62 @@ test_check_config_summary_emits_profile() {
     assert_present 'profile=server' "$summary_file" "--check-config summary missing selected profile"
 }
 
+test_check_config_summary_emits_profile_flow_defaults() {
+    local config_file summary_file profile expected_severity expected_score actual_severity actual_score i
+    local profiles=(baseline server developer-workstation high-signal)
+    local no_tty_severities=(1 2 0 2)
+    local no_tty_scores=(70 90 40 90)
+
+    cd "$DEV_DIR"
+    for i in "${!profiles[@]}"; do
+        profile="${profiles[$i]}"
+        expected_severity="${no_tty_severities[$i]}"
+        expected_score="${no_tty_scores[$i]}"
+        config_file="$(base_config)"
+        summary_file="$(new_tmp /tmp/asic-edr-policy-flow-profile-summary.XXXXXX)"
+        printf '\nprofile=%s\n' "$profile" >> "$config_file"
+
+        if ! ./asic_main --check-config -c "$config_file" > "$summary_file"; then
+            echo "--check-config rejected profile while emitting flow defaults: $profile" >&2
+            cat "$summary_file" >&2 || true
+            exit 1
+        fi
+
+        assert_present 'flow_sensitive_read_then_public_net_severity=2' "$summary_file" "sensitive-read flow severity changed for profile: $profile"
+        assert_present 'flow_shell_downloader_public_net_severity=2' "$summary_file" "shell-downloader flow severity changed for profile: $profile"
+
+        actual_severity="$(summary_value flow_no_tty_public_transfer_tool_severity "$summary_file")"
+        actual_score="$(summary_value flow_no_tty_public_transfer_tool_score "$summary_file")"
+        if [[ "$actual_severity" != "$expected_severity" || "$actual_score" != "$expected_score" ]]; then
+            echo "unexpected no-tty flow defaults for profile $profile: severity=$actual_severity score=$actual_score" >&2
+            cat "$summary_file" >&2 || true
+            exit 1
+        fi
+    done
+}
+
+test_check_config_flow_override_promotes_developer_no_tty() {
+    local config_file summary_file actual_severity actual_score
+    config_file="$(base_config)"
+    summary_file="$(new_tmp /tmp/asic-edr-policy-flow-override-summary.XXXXXX)"
+    printf '\nprofile=developer-workstation\nrule_severity=flow.no_tty_public_transfer_tool,critical\n' >> "$config_file"
+
+    cd "$DEV_DIR"
+    if ! ./asic_main --check-config -c "$config_file" > "$summary_file"; then
+        echo "--check-config rejected developer-workstation flow severity override" >&2
+        cat "$summary_file" >&2 || true
+        exit 1
+    fi
+
+    actual_severity="$(summary_value flow_no_tty_public_transfer_tool_severity "$summary_file")"
+    actual_score="$(summary_value flow_no_tty_public_transfer_tool_score "$summary_file")"
+    if [[ "$actual_severity" != "2" || "$actual_score" != "40" ]]; then
+        echo "developer no-tty flow override was not reflected in compiled summary" >&2
+        cat "$summary_file" >&2 || true
+        exit 1
+    fi
+}
+
 test_runtime_jsonl_emits_policy_summary() {
     local config_file output_file
     config_file="$(base_config)"
@@ -905,6 +961,8 @@ test_check_config_rejects_invalid_policy
 test_check_config_rejects_invalid_profile
 test_check_config_emits_policy_summary
 test_check_config_summary_emits_profile
+test_check_config_summary_emits_profile_flow_defaults
+test_check_config_flow_override_promotes_developer_no_tty
 test_runtime_jsonl_emits_policy_summary
 test_runtime_jsonl_emits_policy_profile
 test_runtime_jsonl_emits_schema_metadata

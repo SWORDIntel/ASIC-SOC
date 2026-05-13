@@ -47,14 +47,14 @@ Completed:
 - Compiled flow findings with stable `flow_id`, `flow_score`, `flow_reasons`, `flow_window_seconds`, and `flow_root_pid`.
 - Flow policy controls through `disable_rule_id=<rule_id>` and `rule_severity=<rule_id>,<severity>`.
 - `flow.sensitive_read_then_public_net`.
+- Profile-aware defaults for compiled behavioral flow severity and score.
 
 Next:
 
-1. Add profile-aware flow tuning.
-2. Add explicit flow thresholds by profile.
-3. Add negative scoring or allowlist hooks for known benign transfer paths.
-4. Add user idle/user-presence enrichment from logind or input sources where available.
-5. Add credential-access flow expansion for archive, encode, copy, or exfil tool chains.
+1. Add negative scoring or allowlist hooks for known benign transfer paths.
+2. Add user idle/user-presence enrichment from logind or input sources where available.
+3. Add credential-access flow expansion for archive, encode, copy, or exfil tool chains.
+4. Add explicit flow parser syntax after compiled behavior stabilizes.
 
 ## Phase 2: Replay And Historical Analytics
 
@@ -67,14 +67,14 @@ Completed:
 - Schema and host metadata on startup and finding records.
 - Local spool path and logrotate scaffold.
 - Local JSONL replay validator for spool validation and normalized dry-run output.
+- Optional QIHSE dry-run forwarder with batching, validation, and checkpoint/resume support.
 
 Next implementation slice:
 
-1. Add QIHSE forwarder dry-run batching.
-2. Add offset checkpoints and retry/backpressure design.
-3. Add quarantine handling for rejected or schema-incompatible batches.
-4. Add saved analytics query sketches for flow detections, process-tree investigation, and cross-host command similarity.
-5. Keep forwarding optional and separate from the daemon hot path.
+1. Add quarantine handling for rejected or schema-incompatible batches.
+2. Add retry/backpressure design for future live submission.
+3. Add saved analytics query sketches for flow detections, process-tree investigation, and cross-host command similarity.
+4. Keep forwarding optional and separate from the daemon hot path.
 
 Later:
 

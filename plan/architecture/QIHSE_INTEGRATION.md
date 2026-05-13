@@ -93,14 +93,18 @@ Failure behavior:
 
 ## Forwarder Model
 
-Implement QIHSE forwarding as a separate process or optional mode after replay validation.
+The current forwarder is dry-run only. It validates JSONL, emits compact `qihse_batch_dry_run` payload records, and updates checkpoints only after successful validation.
 
-Responsibilities:
+Implemented responsibilities:
 
-- tail local JSONL
 - batch records
 - validate schema before send
 - checkpoint offsets durably
+- resume from checkpointed line counts
+
+Future responsibilities:
+
+- tail local JSONL
 - retry with backpressure
 - quarantine rejected batches
 - expose forwarder health records
@@ -132,8 +136,8 @@ Later analytics:
 ## Implementation Slices
 
 1. Schema metadata - complete
-2. Local replay validator - current implemented slice
-3. Forwarder dry-run batching - next
-4. Offset checkpoints and retry/backpressure
+2. Local replay validator - complete
+3. Forwarder dry-run batching and checkpoint/resume - complete
+4. Quarantine handling and retry/backpressure design - next
 5. QIHSE submission integration
 6. Saved analytics packs

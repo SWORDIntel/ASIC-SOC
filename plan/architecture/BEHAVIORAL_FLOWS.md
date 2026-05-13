@@ -57,8 +57,8 @@ Suggested severity mapping:
 
 ## Next Flow Work
 
-1. Profile-aware flow tuning:
-   add profile-specific flow thresholds and default enablement for `baseline`, `server`, `developer-workstation`, and `high-signal`.
+1. Profile-aware flow tuning - initial implementation complete:
+   `flow.no_tty_public_transfer_tool` is warning in `baseline`, critical in `server` and `high-signal`, and informational in `developer-workstation`; explicit `rule_severity` still overrides defaults.
 
 2. Negative scoring and allowlists:
    reduce noise for known update tools, package managers, backup jobs, and approved transfer paths.

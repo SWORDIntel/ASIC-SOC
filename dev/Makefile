@@ -26,6 +26,9 @@ test-policy: all
 test-replay:
 	cd .. && ./tests/replay_validator_test.sh
 
+test-qihse-forwarder:
+	cd .. && ./tests/qihse_forwarder_test.sh
+
 validate-systemd:
 	@command -v systemd-analyze >/dev/null 2>&1 || { echo "SKIP: systemd-analyze not found"; exit 0; }
 	@tmp="$$(mktemp)"; \
@@ -56,4 +59,4 @@ verify-install-local:
 test-ops:
 	@cd .. && ./tests/ops_validation_test.sh
 
-test: test-smoke test-policy test-replay test-ops
+test: test-smoke test-policy test-replay test-qihse-forwarder test-ops
