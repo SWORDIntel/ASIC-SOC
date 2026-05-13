@@ -29,6 +29,7 @@
 - policy disables: built-in/default detection rules can be removed with `disable_<rule_key>=value` or `disable_rule_id=<rule_id>`
 - policy summary: startup output reports active profile, rule counts, active severity floor, and deduplication window
 - deduplication: repeated findings are suppressed and summarized with `repeat_count`; the suppression window is controlled by `dedup_window_seconds`
+- behavioral flow roadmap: `plan/architecture/BEHAVIORAL_FLOWS.md` defines the planned process-tree correlation model for suspicious logic flows, including no-TTY or idle-user public transfer activity
 
 ## Rule IDs
 
@@ -37,5 +38,6 @@ Executable-memory detections use fixed IDs: `mem.exec_mprotect`, `mem.rwx_mprote
 
 ## Near-Term Work
 
-1. Add process lineage scoring.
-2. Add Debian packaging metadata.
+1. Add lineage and TTY enrichment as the first behavioral-flow foundation.
+2. Add bounded process-tree flow state.
+3. Add Debian packaging metadata.

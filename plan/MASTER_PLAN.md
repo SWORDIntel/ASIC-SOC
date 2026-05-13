@@ -34,15 +34,23 @@ Turn the repository into a focused endpoint detection and response agent instead
 
 Objective: improve signal quality without expanding the agent into non-EDR domains.
 
-1. Add process lineage scoring:
+1. Add behavioral flow detection:
+   - track short-lived activity windows per process tree
+   - correlate lineage, sensitive file access, network destination scope, and user/session context
+   - emit scored flow findings with stable rule IDs
+2. Add process lineage scoring:
    - parent and grandparent command names
    - shell-spawned interpreter/download tool chains
    - suspicious parent/child pair rules
-2. Add executable memory refinements:
+3. Add user activity and session context:
+   - no controlling TTY versus interactive terminal
+   - service-launched versus user-launched process context
+   - optional idle-time source from logind, `/dev/input`, X11, or Wayland
+4. Add executable memory refinements:
    - distinguish anonymous executable memory from file-backed executable mappings
    - classify RWX mappings as critical
    - allow per-process JIT exceptions from rules
-3. Add additional network rule grouping:
+5. Add additional network rule grouping:
    - named suspicious destination port groups
    - profile-specific network group defaults
    - per-group severity overrides
@@ -125,7 +133,7 @@ Objective: prevent regressions while the sensor grows.
 
 ## Next Implementation Slice
 
-1. Add process lineage scoring.
+1. Add lineage and TTY enrichment as the first behavioral-flow foundation.
 2. Capture parent and grandparent command names in findings.
-3. Add shell-spawned interpreter/download tool-chain detections.
-4. Add suspicious parent/child pair rules with stable rule IDs.
+3. Add `has_tty` and `interactive_session` JSONL fields where available.
+4. Prepare bounded process-tree flow state for shell/downloader/public-network detections.
