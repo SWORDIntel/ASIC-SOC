@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEV_DIR="$ROOT_DIR/dev"
+
+TMP_FILES=()
+
+cleanup() {
+    for path in "${TMP_FILES[@]}"; do
+        sudo rm -f "$path" 2>/dev/null || rm -f "$path" 2>/dev/null || true
+    done
+}
+trap cleanup EXIT
+
+new_tmp() {
+    local path
+    path="$(mktemp "$1")"
+    TMP_FILES+=("$path")
+    printf '%s\n' "$path"
+}
+
+new_output_path() {
+    local path
+    path="$(mktemp -u "$1")"
+    TMP_FILES+=("$path")
+    printf '%s\n' "$path"
+}
+
+trigger_warning_events() {
+    sudo cat /etc/shadow >/dev/null || true
+    python3 - <<'PY' >/dev/null 2>&1 || true
+import socket
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.5)
+try:
+    s.connect(("127.0.0.1", 4444))
+except OSError:
+    pass
+finally:
+    s.close()
+PY
+}
+
+run_agent_capture() {
+    local config_file="$1"
+    local output_file="$2"
+
+    cd "$DEV_DIR"
+    sudo timeout -s INT 4 ./asic_main \
+        --quiet \
+        --bpf asic_sensor.bpf.o \
+        -c "$config_file" \
+        -o "$output_file" &
+    local agent_pid=$!
+
+    sleep 1
+    trigger_warning_events
+    wait "$agent_pid" || test "$?" -eq 124
+}
+
+base_config() {
+    local config_file
+    config_file="$(new_tmp /tmp/asic-edr-policy-rules.XXXXXX)"
+    cp "$ROOT_DIR/config/rules.conf" "$config_file"
+    printf '%s\n' "$config_file"
+}
+
+assert_absent() {
+    local pattern="$1"
+    local file="$2"
+    local message="$3"
+
+    if grep -q "$pattern" "$file" 2>/dev/null; then
+        echo "$message" >&2
+        cat "$file" >&2 || true
+        exit 1
+    fi
+}
+
+assert_present() {
+    local pattern="$1"
+    local file="$2"
+    local message="$3"
+
+    if ! grep -q "$pattern" "$file" 2>/dev/null; then
+        echo "$message" >&2
+        cat "$file" >&2 || true
+        exit 1
+    fi
+}
+
+assert_finding_exe_provenance_fields() {
+    local file="$1"
+
+    python3 - "$file" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+number_fields = (
+    "exe_dev",
+    "exe_inode",
+    "exe_mode",
+    "exe_uid",
+    "exe_gid",
+    "exe_mtime",
+)
+bool_fields = ("exe_deleted", "exe_writable_path")
+findings = []
+
+with open(path, "r", encoding="utf-8") as lines:
+    for line_no, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(f"invalid JSONL on line {line_no}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if "severity" in record and "reason" in record:
+            findings.append((line_no, record))
+
+if not findings:
+    print("no finding JSONL records found", file=sys.stderr)
+    sys.exit(1)
+
+for line_no, record in findings:
+    missing = [field for field in number_fields + bool_fields if field not in record]
+    if missing:
+        print(
+            f"finding JSONL record on line {line_no} missing fields: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    for field in number_fields:
+        if isinstance(record[field], bool) or not isinstance(record[field], int):
+            print(
+                f"finding JSONL record on line {line_no} has non-integer {field}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    for field in bool_fields:
+        if not isinstance(record[field], bool):
+            print(
+                f"finding JSONL record on line {line_no} has non-boolean {field}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+PY
+}
+
+test_check_config_accepts_valid_policy() {
+    local config_file
+    config_file="$(base_config)"
+
+    cd "$DEV_DIR"
+    if ! ./asic_main --check-config -c "$config_file" >/dev/null; then
+        echo "--check-config rejected a valid policy" >&2
+        exit 1
+    fi
+}
+
+test_check_config_rejects_invalid_policy() {
+    local config_file
+    config_file="$(new_tmp /tmp/asic-edr-policy-invalid.XXXXXX)"
+    printf 'min_severity=urgent\n' > "$config_file"
+
+    cd "$DEV_DIR"
+    if ./asic_main --check-config -c "$config_file" >/dev/null 2>&1; then
+        echo "--check-config accepted invalid min_severity" >&2
+        exit 1
+    fi
+
+    printf 'unknown_key=value\n' > "$config_file"
+    if ./asic_main --check-config -c "$config_file" >/dev/null 2>&1; then
+        echo "--check-config accepted unknown key" >&2
+        exit 1
+    fi
+}
+
+test_check_config_emits_policy_summary() {
+    local config_file summary_file
+    config_file="$(base_config)"
+    summary_file="$(new_tmp /tmp/asic-edr-policy-summary.XXXXXX)"
+
+    cd "$DEV_DIR"
+    if ! ./asic_main --check-config -c "$config_file" > "$summary_file"; then
+        echo "--check-config rejected a valid policy while emitting summary" >&2
+        cat "$summary_file" >&2 || true
+        exit 1
+    fi
+
+    assert_present 'exec_exact=' "$summary_file" "--check-config summary missing exec_exact counter"
+    assert_present 'exec_prefix=' "$summary_file" "--check-config summary missing exec_prefix counter"
+    assert_present 'sensitive_read=' "$summary_file" "--check-config summary missing sensitive_read counter"
+    assert_present 'sensitive_write=' "$summary_file" "--check-config summary missing sensitive_write counter"
+    assert_present 'jit_allow=' "$summary_file" "--check-config summary missing jit_allow counter"
+    assert_present 'suspicious_ports=' "$summary_file" "--check-config summary missing suspicious_ports counter"
+    assert_present 'min_severity=' "$summary_file" "--check-config summary missing min_severity"
+    assert_present 'dedup_window_seconds=' "$summary_file" "--check-config summary missing dedup_window_seconds"
+}
+
+test_runtime_jsonl_emits_policy_summary() {
+    local config_file output_file
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-startup.XXXXXX.jsonl)"
+
+    run_agent_capture "$config_file" "$output_file"
+
+    assert_present '"record":"policy_summary"' "$output_file" "missing startup policy_summary JSONL record"
+}
+
+test_runtime_jsonl_emits_exe_provenance_fields() {
+    local config_file output_file
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-provenance.XXXXXX.jsonl)"
+
+    run_agent_capture "$config_file" "$output_file"
+
+    assert_finding_exe_provenance_fields "$output_file"
+}
+
+test_critical_floor_suppresses_warnings() {
+    local config_file output_file
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-critical.XXXXXX.jsonl)"
+    printf '\nmin_severity=critical\n' >> "$config_file"
+
+    run_agent_capture "$config_file" "$output_file"
+
+    assert_absent '"target":"/etc/shadow"' "$output_file" "warning sensitive-read finding was not suppressed"
+    assert_absent '"dst_port":4444' "$output_file" "warning suspicious-port finding was not suppressed"
+}
+
+test_per_rule_override_promotes_port() {
+    local config_file output_file
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-override.XXXXXX.jsonl)"
+    printf '\nmin_severity=critical\nsuspicious_port=4444,critical\n' >> "$config_file"
+
+    run_agent_capture "$config_file" "$output_file"
+
+    assert_present '"dst_port":4444' "$output_file" "missing promoted suspicious-port finding"
+    assert_present '"dst_port":4444.*"severity":2' "$output_file" "suspicious-port finding was not promoted to critical"
+}
+
+test_disable_controls_suppress_selected_rules() {
+    local config_file output_file
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-disable.XXXXXX.jsonl)"
+    printf '\ndisable_sensitive_read=/etc/shadow\ndisable_suspicious_port=4444\n' >> "$config_file"
+
+    run_agent_capture "$config_file" "$output_file"
+
+    assert_absent '"target":"/etc/shadow"' "$output_file" "disabled sensitive_read still emitted"
+    assert_absent '"dst_port":4444' "$output_file" "disabled suspicious_port still emitted"
+}
+
+test_check_config_accepts_valid_policy
+test_check_config_rejects_invalid_policy
+test_check_config_emits_policy_summary
+test_runtime_jsonl_emits_policy_summary
+test_runtime_jsonl_emits_exe_provenance_fields
+test_critical_floor_suppresses_warnings
+test_per_rule_override_promotes_port
+test_disable_controls_suppress_selected_rules
+
+echo "policy test passed"

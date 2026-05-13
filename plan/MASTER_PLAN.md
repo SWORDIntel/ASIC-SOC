@@ -1,39 +1,129 @@
+# ASIC-SOC EDR Roadmap
 
-# Security ASIC: APT-Grade GPU-Isolated Defense System
+## Goal
 
-## Project Objective
-Transform a legacy NVIDIA GTX 560 Ti (Fermi) into a dedicated, hardware-isolated Security ASIC. 
+Turn the repository into a focused endpoint detection and response agent instead of a mixed-purpose hardware/security showcase.
 
-### Headless ASIC Configuration
-The driver has been stripped of all graphical components (OpenGL/GLX/EGL) to prevent system instability and library conflicts (e.g., Chrome crashes). The card now operates in a **Pure Compute Mode**, exposing only OpenCL/CUDA for security logic while the Intel iGPU handles all desktop rendering.
+## Completed Baseline
 
-## 1. Core Architecture (ASIC Layer)
-- **Engine**: Quantum-Inspired High-Speed Engine (QIHSE) port to OpenCL 1.2.
-- **Isolation**: Detection logic and threat signatures live in isolated VRAM (1.2 GB).
-- **Throughput Target**: >1.8 GB/s (Sustained).
-- **Primary Backends**:
-    - **EDGE Core**: XDP-based network packet analysis (line-rate).
-    - **EDR/CFP Core**: eBPF-based syscall and memory protection monitoring.
-    - **SWI Core**: Background system-wide binary integrity hashing.
+1. Keep syscall telemetry for process execution and memory permission changes.
+2. Keep file-open telemetry for sensitive path access.
+3. Remove or archive everything unrelated to EDR from the build path.
+4. Emit structured logs for downstream collection.
+5. Load configurable rules and allowlists.
+6. Enrich findings with parent process, executable path, cwd, and command line.
+7. Track outbound connection metadata and suspicious destination ports.
+8. Provide a smoke-test target for build/runtime regression checks.
+9. Include repeat counters for deduplicated findings.
+10. Install log rotation for JSONL findings.
+11. Install a hardened systemd service unit.
+12. Make the deduplication window configurable from rules.
+13. Add configurable minimum finding severity.
+14. Add per-rule severity overrides.
+15. Add rule disable controls for built-in/default rules.
+16. Add policy regression tests for severity floors, overrides, and disables.
+17. Add `--check-config` for offline policy validation.
+18. Add startup policy summary output and JSONL summary records when `-o` is used.
+19. Add executable provenance metadata to JSONL findings: device, inode, mode, owner ids, mtime, deleted executable marker, and writable-path classification.
 
-## 2. Algorithms & Logic (Porting Roadmap)
-- **QIHSE Superposition Search**: Porting `qihse_superposition.h` logic to OpenCL kernels to allow searching millions of patterns in a single pass.
-- **Vector DB**: Porting `qihse_vector_db.h` to GPU to enable fuzzy/vector-similarity search for polymorphic threat detection.
-- **MOE Behavioral Arbiter**: A "Mixture of Experts" gating kernel that aggregates scores from Network, Host, and Hardware sensors.
+## Phase 1: Detection Quality
 
-## 3. Sensor Layers
-- **L1 (Network)**: Raw Ethernet XDP Sensor (`enp4s0`). Target: APT C2 beacons.
-- **L2 (Host)**: Syscall Tracepoints (`execve`, `mprotect`, `mmap`). Target: Exploit chains.
-- **L3 (Hardware)**: CPU Performance Monitoring Counters (PMC). Target: Side-channel anomalies.
+Objective: improve signal quality without expanding the agent into non-EDR domains.
 
-## 4. Integration Datasets
-- **Network**: `apt_traffic_dataset.npz` (Features for EDGE Core).
-- **Host**: `exploitgen` (Signatures for EDR/CFP Core).
-- **Signal**: `sidechannel_ml` (Anomalies for Hardware Core).
+1. Add process lineage scoring:
+   - parent and grandparent command names
+   - shell-spawned interpreter/download tool chains
+   - suspicious parent/child pair rules
+2. Add executable memory refinements:
+   - distinguish anonymous executable memory from file-backed executable mappings
+   - classify RWX mappings as critical
+   - allow per-process JIT exceptions from rules
+3. Add network context refinements:
+   - loopback versus external destination classification
+   - private versus public destination classification
+   - suspicious destination port groups
 
-## 5. Development Roadmap (ASIC-DEV)
-1. **[CURRENT]** Port QIHSE Vector/Superposition math to OpenCL (`asic_core.cl`).
-2. Implement binary "Tensor DB" loader for GPU VRAM.
-3. Integrate XDP Network Sensor with GPU Signature Core.
-4. Integrate PMC Hardware Sensor for side-channel detection.
-5. Build the Unified MOE Gating Logic.
+## Phase 2: Policy Model
+
+Objective: make rules easier to maintain and safer to deploy.
+
+1. Add rule groups/profiles:
+   - `baseline`
+   - `server`
+   - `developer-workstation`
+   - `high-signal`
+2. Add rule IDs:
+   - stable identifiers in JSONL
+   - easier disable/override handling
+   - policy regression tests keyed by ID
+3. Add config validation mode:
+   - `--check-config`
+   - no BPF load required
+   - returns non-zero on invalid rules
+4. Add policy startup records:
+   - structured startup/shutdown records
+   - config load warnings in JSONL
+
+## Phase 3: Response And Operations
+
+Objective: keep response controlled and auditable.
+
+1. Add dry-run response actions:
+   - log-only process kill candidate
+   - log-only network containment candidate
+   - explicit action reason in JSONL
+2. Add response policy gates:
+   - disabled by default
+   - require `response_enabled=true`
+   - require per-rule `action=...`
+3. Add health telemetry:
+   - events received
+   - findings emitted
+   - dedup suppressions
+   - ring-buffer drops if exposed by libbpf/kernel
+4. Add service observability:
+   - systemd watchdog readiness
+   - runtime health state
+   - shutdown reason in JSONL
+
+## Phase 4: Packaging
+
+Objective: make deployment reproducible.
+
+1. Add Debian packaging:
+   - package binary, BPF object, rules, service, logrotate config
+   - post-install systemd daemon reload
+   - conffile handling for `/etc/asic-edr/rules.conf`
+2. Add release artifacts:
+   - build checksums
+   - versioned tarball
+   - install verification script
+3. Add install smoke check:
+   - verify service unit
+   - verify BPF object path
+   - verify rules path
+   - verify log directory permissions
+
+## Phase 5: Test Coverage
+
+Objective: prevent regressions while the sensor grows.
+
+1. Add config parser unit tests around:
+   - severity parsing
+   - duplicate override order
+   - disable controls
+   - invalid values
+2. Add runtime tests around:
+   - sensitive write findings
+   - suspicious exec findings
+   - JIT allowlist behavior
+   - deduplication with `dedup_window_seconds=0`
+3. Add service/package tests:
+   - `systemd-analyze verify`
+   - `systemd-analyze security --offline`
+   - logrotate dry run
+
+## Next Implementation Slice
+
+1. Add rule groups/profiles.
+2. Add stable rule IDs for JSONL findings, disables, overrides, and policy regression tests.

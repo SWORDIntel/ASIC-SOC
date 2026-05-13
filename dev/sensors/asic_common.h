@@ -2,34 +2,33 @@
 #ifndef __ASIC_COMMON_H__
 #define __ASIC_COMMON_H__
 
-#define EVENT_EXEC    1
-#define EVENT_MEM     2
-#define EVENT_NET     3
-#define EVENT_PRIV    4
-#define EVENT_STACK   5
-#define EVENT_ME      6
-#define EVENT_MALWARE 7 
-#define EVENT_INTEL   8
-#define EVENT_CODE    9 
-#define EVENT_RF      10
+enum edr_event_type {
+    EDR_EVENT_EXEC = 1,
+    EDR_EVENT_MPROTECT = 2,
+    EDR_EVENT_MMAP = 3,
+    EDR_EVENT_OPENAT = 4,
+    EDR_EVENT_CONNECT = 5,
+};
 
-#define MAX_PAYLOAD 256
+#define EDR_MAX_TARGET 256
 
-struct asic_event {
-    int type;
-    int pid;
-    int ppid;
-    int uid;
-    int puid;
-    int loginuid; 
-    int sessionid;
-    int has_tty;
+struct edr_event {
+    unsigned int type;
+    unsigned int pid;
+    unsigned int tid;
+    unsigned int ppid;
+    unsigned int uid;
+    unsigned int gid;
+    unsigned int flags;
+    unsigned int prot;
+    unsigned int net_family;
+    unsigned int net_addr_v4;
+    unsigned short net_port;
+    unsigned char net_addr_v6[16];
+    unsigned char reserved[6];
+    unsigned long long timestamp_ns;
     char comm[16];
-    char pcomm[16];
-    int arg1; 
-    char payload[MAX_PAYLOAD];
-    int node_id;
-    float rf_signals[10];
+    char target[EDR_MAX_TARGET];
 };
 
 #endif

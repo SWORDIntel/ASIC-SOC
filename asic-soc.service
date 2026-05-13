@@ -1,14 +1,46 @@
 
 [Unit]
-Description=QIHSE Monolithic Security ASIC
+Description=ASIC-SOC EDR Agent
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /home/john/Documents/ASIC-SOC/scripts/asic_dashboard.py enp4s0 wlp2s0
-WorkingDirectory=/home/john/Documents/ASIC-SOC/scripts
+ExecStart=/usr/local/bin/asic-edr --quiet --bpf /usr/local/lib/asic-edr/asic_sensor.bpf.o -c /etc/asic-edr/rules.conf -o /var/log/asic-edr/events.jsonl
+WorkingDirectory=/
 Restart=always
 User=root
+UMask=0027
+LimitMEMLOCK=infinity
+
+# eBPF loading and process enrichment require elevated privileges. Keep the
+# bounding set explicit so the unit does not run with the full root capability
+# set once started by systemd.
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_RESOURCE CAP_SYS_ADMIN CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+
+# Keep the service filesystem mostly read-only. The daemon only needs its
+# config/object files and the JSONL output directory at runtime.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/etc/asic-edr /usr/local/lib/asic-edr
+ReadWritePaths=/var/log/asic-edr
+PrivateDevices=yes
+PrivateTmp=yes
+
+# General process hardening that does not interfere with BPF attachment or
+# /proc-based enrichment.
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

@@ -1,706 +1,1219 @@
-
-#include <math.h>
+#include <bpf/libbpf.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <signal.h>
-#include <pthread.h>
-#include <CL/cl.h>
-#include <bpf/libbpf.h>
-#include <bpf/bpf.h>
-#include <net/if.h>
-#include <linux/if_link.h>
-#include <fcntl.h>
-#include <sys/socket.h>
-#include <sys/ioctl.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/types.h>
 #include <sys/stat.h>
-#include <pci/pci.h>
+#include <sys/mman.h>
+#include <time.h>
+#include <unistd.h>
+
 #include "asic_common.h"
 #include "asic_telemetry.h"
 
-// ASIC Overdrive Config
-#define MAX_DB_SIZE 100000 
-#define VECTOR_DIMS 160
-#define NUM_MALWARE_SIGS 10
-#define INTEL_KEYWORD_LEN 16
-#define INTEL_KEYWORD_COUNT 4
-#define MAX_CODE_SNIPPETS 5000
-#define NUM_MASKS 4
-#define PMC_WINDOW 100
-#define NUM_HYPOTHESES (256 * 1024)
-#define BLACKBOX_SIZE (10 * 1024 * 1024)
-#define ROUND_UP(n, sz) (((n) + (sz) - 1) / (sz) * (sz))
+#define ASIC_EDR_VERSION "0.2.0"
+#define DEFAULT_CONFIG_PATH "/etc/asic-edr/rules.conf"
+#define MAX_RULES 128
+#define MAX_CMDLINE 512
+#define DEFAULT_DEDUP_WINDOW_SECONDS 5ULL
 
-// OpenCL Globals
-cl_context ctx;
-cl_command_queue cmd_q;
-cl_kernel vec_k, super_k, entropy_k, priv_k, me_k, rf_k, mal_k, intel_k, code_k, evolution_k, me_berserker_k, me_finalizer_k, hammer_k, blackbox_k;
-cl_mem db_vectors_mem, dev_masks, dev_mal_sigs, dev_intel_keywords, dev_codebase, blackbox_mem;
-cl_mem dev_sum_x, dev_sum_xy, dev_sum_x2;
-
-const size_t lws = 256;
-
-// PRE-ALLOCATED BUFFER POOL (Zero-Overhead Hot Path)
-cl_mem dev_event_q, dev_event_scores, dev_event_alert_me, dev_event_alert_priv, dev_pmc_entropy;
-cl_mem dev_event_payload, dev_event_dr;
-
-static int actual_db_size = 0;
-
-// Swarm Intelligence Globals
-int swarm_sd;
-struct sockaddr_in swarm_addr;
-
-// Vault State
-unsigned long threat_masks[NUM_MASKS] = { 0x2f6574632f736861, 0x63686d6f64202b78, 0x6375726c202d734c, 0x707974686f6e202d };
-unsigned long mal_sigs[NUM_MALWARE_SIGS] = { 0xDEADC0DE, 0xBEEFBABE, 0x1337C0DE };
-const char intel_keywords[INTEL_KEYWORD_COUNT][INTEL_KEYWORD_LEN] = { "0day            ", "exploit         ", "cve-2026        ", "payload         " };
-
-static volatile float total_traces_processed = 0.0f;
 static volatile sig_atomic_t stop = 0;
-static volatile sig_atomic_t hammer_mode = 0;
-static volatile sig_atomic_t vault_locked = 0;
-static int blackbox_offset = 0;
-static int node_id = 0;
+static struct bpf_link *links[5];
 
-// Fortran HPC Interop (Path C)
-extern void qihse_hebbian_update_fortran(float *db, const float *q, int b, float lr, int vector_dims);
-extern void me_correlation_finalizer_fortran(const float *sum_x, const float *sum_xy, const float *sum_x2, float *final_scores, float n_total, int num_hypotheses);
+enum edr_severity {
+    EDR_SEV_INFO = 0,
+    EDR_SEV_WARN = 1,
+    EDR_SEV_CRITICAL = 2,
+};
 
-// C++ UI Thread
-extern void* run_ui_thread(void* arg);
+struct edr_finding {
+    enum edr_severity severity;
+    const char *reason;
+};
 
-// PCI Access for ME Hammering
-struct pci_access *pacc;
-struct pci_dev *me_dev = NULL;
+struct edr_options {
+    const char *config_path;
+    const char *bpf_path;
+    FILE *jsonl;
+    bool console;
+    bool all_events;
+    bool check_config;
+};
 
-void init_pci() {
-    pacc = pci_alloc();
-    pci_init(pacc);
-    pci_scan_bus(pacc);
-    
-    // Find Intel ME device (00:16.0)
-    for (struct pci_dev *dev = pacc->devices; dev; dev = dev->next) {
-        pci_fill_info(dev, PCI_FILL_IDENT);
-        if (dev->bus == 0 && dev->dev == 22 && dev->func == 0) {
-            me_dev = dev;
-            printf("[ASIC] Target ME Device Found: %02x:%02x.%d\n", dev->bus, dev->dev, dev->func);
+struct edr_rules {
+    char suspicious_exec_exact[MAX_RULES][64];
+    enum edr_severity suspicious_exec_exact_severity[MAX_RULES];
+    size_t suspicious_exec_exact_count;
+    char suspicious_exec_prefix[MAX_RULES][64];
+    enum edr_severity suspicious_exec_prefix_severity[MAX_RULES];
+    size_t suspicious_exec_prefix_count;
+    char sensitive_read[MAX_RULES][EDR_MAX_TARGET];
+    enum edr_severity sensitive_read_severity[MAX_RULES];
+    size_t sensitive_read_count;
+    char sensitive_write[MAX_RULES][EDR_MAX_TARGET];
+    enum edr_severity sensitive_write_severity[MAX_RULES];
+    size_t sensitive_write_count;
+    char jit_allow_comm[MAX_RULES][16];
+    size_t jit_allow_comm_count;
+    uint16_t suspicious_ports[MAX_RULES];
+    enum edr_severity suspicious_port_severity[MAX_RULES];
+    size_t suspicious_port_count;
+    uint64_t dedup_window_ns;
+    enum edr_severity min_severity;
+};
+
+struct policy_summary {
+    size_t suspicious_exec_exact_count;
+    size_t suspicious_exec_prefix_count;
+    size_t sensitive_read_count;
+    size_t sensitive_write_count;
+    size_t jit_allow_comm_count;
+    size_t suspicious_port_count;
+    enum edr_severity min_severity;
+    uint64_t dedup_window_seconds;
+};
+
+struct process_context {
+    uint32_t ppid;
+    char parent_comm[16];
+    char exe[EDR_MAX_TARGET];
+    char cwd[EDR_MAX_TARGET];
+    char cmdline[MAX_CMDLINE];
+    unsigned long long exe_dev;
+    unsigned long long exe_inode;
+    unsigned int exe_mode;
+    unsigned int exe_uid;
+    unsigned int exe_gid;
+    long long exe_mtime;
+    bool exe_deleted;
+    bool exe_writable_path;
+};
+
+struct dedup_entry {
+    bool active;
+    uint32_t type;
+    uint32_t pid;
+    uint32_t prot;
+    uint32_t flags;
+    uint32_t net_family;
+    uint16_t net_port;
+    uint64_t last_seen_ns;
+    uint32_t repeat_count;
+    struct edr_event event;
+    char comm[16];
+    char target[EDR_MAX_TARGET];
+    const char *reason;
+    enum edr_severity severity;
+};
+
+#define DEDUP_ENTRIES 128
+#define NS_PER_SECOND (1000ULL * 1000ULL * 1000ULL)
+
+static struct dedup_entry dedup_cache[DEDUP_ENTRIES];
+static size_t dedup_cursor = 0;
+static struct edr_rules rules;
+
+static void sig_handler(int sig) {
+    (void)sig;
+    stop = 1;
+}
+
+static char *trim(char *value);
+
+static bool add_rule_value(char values[][64], enum edr_severity severities[], size_t *count,
+                           size_t capacity, const char *value, enum edr_severity severity) {
+    if (*count >= capacity) {
+        return false;
+    }
+    snprintf(values[*count], 64, "%s", value);
+    severities[*count] = severity;
+    (*count)++;
+    return true;
+}
+
+static bool add_comm_rule(char values[][16], size_t *count, size_t capacity, const char *value) {
+    if (*count >= capacity) {
+        return false;
+    }
+    snprintf(values[*count], 16, "%s", value);
+    (*count)++;
+    return true;
+}
+
+static bool remove_rule_value(char values[][64], enum edr_severity severities[], size_t *count,
+                              const char *value) {
+    bool removed = false;
+    for (size_t i = 0; i < *count;) {
+        if (strcmp(values[i], value) == 0) {
+            size_t tail = *count - i - 1;
+            if (tail > 0) {
+                memmove(&values[i], &values[i + 1], tail * sizeof(values[0]));
+                memmove(&severities[i], &severities[i + 1], tail * sizeof(severities[0]));
+            }
+            (*count)--;
+            removed = true;
+            continue;
+        }
+        i++;
+    }
+    return removed;
+}
+
+static bool remove_path_rule(char values[][EDR_MAX_TARGET], enum edr_severity severities[],
+                             size_t *count, const char *value) {
+    bool removed = false;
+    for (size_t i = 0; i < *count;) {
+        if (strcmp(values[i], value) == 0) {
+            size_t tail = *count - i - 1;
+            if (tail > 0) {
+                memmove(&values[i], &values[i + 1], tail * sizeof(values[0]));
+                memmove(&severities[i], &severities[i + 1], tail * sizeof(severities[0]));
+            }
+            (*count)--;
+            removed = true;
+            continue;
+        }
+        i++;
+    }
+    return removed;
+}
+
+static bool remove_comm_rule(char values[][16], size_t *count, const char *value) {
+    bool removed = false;
+    for (size_t i = 0; i < *count;) {
+        if (strcmp(values[i], value) == 0) {
+            size_t tail = *count - i - 1;
+            if (tail > 0) {
+                memmove(&values[i], &values[i + 1], tail * sizeof(values[0]));
+            }
+            (*count)--;
+            removed = true;
+            continue;
+        }
+        i++;
+    }
+    return removed;
+}
+
+static bool add_port_rule(uint16_t values[], enum edr_severity severities[], size_t *count,
+                          size_t capacity, const char *value, enum edr_severity severity) {
+    if (*count >= capacity) {
+        return false;
+    }
+
+    char *end = NULL;
+    unsigned long port = strtoul(value, &end, 10);
+    if (!end || *end != '\0' || port == 0 || port > 65535) {
+        return false;
+    }
+
+    values[*count] = (uint16_t)port;
+    severities[*count] = severity;
+    (*count)++;
+    return true;
+}
+
+static bool remove_port_rule(uint16_t values[], enum edr_severity severities[], size_t *count,
+                             const char *value) {
+    char *end = NULL;
+    unsigned long port = strtoul(value, &end, 10);
+    if (!end || *end != '\0' || port == 0 || port > 65535) {
+        return false;
+    }
+
+    bool removed = false;
+    for (size_t i = 0; i < *count;) {
+        if (values[i] == (uint16_t)port) {
+            size_t tail = *count - i - 1;
+            if (tail > 0) {
+                memmove(&values[i], &values[i + 1], tail * sizeof(values[0]));
+                memmove(&severities[i], &severities[i + 1], tail * sizeof(severities[0]));
+            }
+            (*count)--;
+            removed = true;
+            continue;
+        }
+        i++;
+    }
+    return removed;
+}
+
+static bool parse_u64(const char *value, uint64_t *out) {
+    errno = 0;
+    char *end = NULL;
+    unsigned long long parsed = strtoull(value, &end, 10);
+    if (errno != 0 || !end || *end != '\0') {
+        return false;
+    }
+    *out = (uint64_t)parsed;
+    return true;
+}
+
+static bool parse_severity(const char *value, enum edr_severity *out) {
+    if (strcmp(value, "info") == 0 || strcmp(value, "0") == 0) {
+        *out = EDR_SEV_INFO;
+        return true;
+    }
+    if (strcmp(value, "warn") == 0 || strcmp(value, "warning") == 0 || strcmp(value, "1") == 0) {
+        *out = EDR_SEV_WARN;
+        return true;
+    }
+    if (strcmp(value, "critical") == 0 || strcmp(value, "crit") == 0 || strcmp(value, "2") == 0) {
+        *out = EDR_SEV_CRITICAL;
+        return true;
+    }
+    return false;
+}
+
+static bool add_path_rule(char values[][EDR_MAX_TARGET], enum edr_severity severities[], size_t *count,
+                          size_t capacity, const char *value, enum edr_severity severity) {
+    if (*count >= capacity) {
+        return false;
+    }
+    snprintf(values[*count], EDR_MAX_TARGET, "%s", value);
+    severities[*count] = severity;
+    (*count)++;
+    return true;
+}
+
+static struct policy_summary current_policy_summary(void) {
+    return (struct policy_summary){
+        .suspicious_exec_exact_count = rules.suspicious_exec_exact_count,
+        .suspicious_exec_prefix_count = rules.suspicious_exec_prefix_count,
+        .sensitive_read_count = rules.sensitive_read_count,
+        .sensitive_write_count = rules.sensitive_write_count,
+        .jit_allow_comm_count = rules.jit_allow_comm_count,
+        .suspicious_port_count = rules.suspicious_port_count,
+        .min_severity = rules.min_severity,
+        .dedup_window_seconds = rules.dedup_window_ns / NS_PER_SECOND,
+    };
+}
+
+static void write_policy_summary_console(FILE *out, const struct policy_summary *summary,
+                                         const char *prefix) {
+    if (!out || !summary) {
+        return;
+    }
+
+    fprintf(out,
+            "%sexec_exact=%zu exec_prefix=%zu sensitive_read=%zu sensitive_write=%zu jit_allow=%zu suspicious_ports=%zu min_severity=%d dedup_window_seconds=%llu\n",
+            prefix ? prefix : "",
+            summary->suspicious_exec_exact_count,
+            summary->suspicious_exec_prefix_count,
+            summary->sensitive_read_count,
+            summary->sensitive_write_count,
+            summary->jit_allow_comm_count,
+            summary->suspicious_port_count,
+            summary->min_severity,
+            (unsigned long long)summary->dedup_window_seconds);
+}
+
+static void write_policy_summary_jsonl(FILE *out, const struct policy_summary *summary) {
+    if (!out || !summary) {
+        return;
+    }
+
+    fprintf(out,
+            "{\"record\":\"policy_summary\",\"version\":\"%s\",\"exec_exact\":%zu,\"exec_prefix\":%zu,"
+            "\"sensitive_read\":%zu,\"sensitive_write\":%zu,\"jit_allow\":%zu,"
+            "\"suspicious_ports\":%zu,\"min_severity\":%d,\"dedup_window_seconds\":%llu}\n",
+            ASIC_EDR_VERSION,
+            summary->suspicious_exec_exact_count,
+            summary->suspicious_exec_prefix_count,
+            summary->sensitive_read_count,
+            summary->sensitive_write_count,
+            summary->jit_allow_comm_count,
+            summary->suspicious_port_count,
+            summary->min_severity,
+            (unsigned long long)summary->dedup_window_seconds);
+    fflush(out);
+}
+
+static bool split_rule_value(char *raw_value, enum edr_severity default_severity,
+                             char **rule_value, enum edr_severity *severity) {
+    *severity = default_severity;
+    char *comma = strrchr(raw_value, ',');
+    if (comma) {
+        *comma = '\0';
+        char *severity_value = trim(comma + 1);
+        if (!parse_severity(severity_value, severity)) {
+            return false;
+        }
+    }
+
+    *rule_value = trim(raw_value);
+    return (*rule_value)[0] != '\0';
+}
+
+static void init_default_rules(void) {
+    memset(&rules, 0, sizeof(rules));
+    rules.dedup_window_ns = DEFAULT_DEDUP_WINDOW_SECONDS * NS_PER_SECOND;
+    rules.min_severity = EDR_SEV_WARN;
+
+    const char *exec_exact[] = {
+        "bash", "sh", "dash", "zsh", "curl", "wget", "nc", "ncat", "socat", "pkexec", "sudo",
+    };
+    const char *exec_prefix[] = {
+        "python", "perl", "ruby",
+    };
+    const char *read_paths[] = {
+        "/etc/shadow", "/etc/sudoers", "/etc/ssh/", "/root/.ssh/",
+        "/.ssh/id_rsa", "/.ssh/id_ed25519", "/proc/kcore",
+    };
+    const char *write_paths[] = {
+        "/etc/passwd", "/etc/group", "/etc/shadow", "/etc/sudoers", "/etc/ssh/",
+        "/root/.ssh/", "/.ssh/", "/etc/systemd/system/", "/etc/cron.", "/etc/crontab",
+    };
+    const char *jit_allow[] = {
+        "node", "chrome", "chromium", "firefox", "java",
+    };
+    const char *ports[] = {
+        "4444", "5555", "6666", "6667", "1337", "31337",
+    };
+
+    for (size_t i = 0; i < sizeof(exec_exact) / sizeof(exec_exact[0]); i++) {
+        add_rule_value(rules.suspicious_exec_exact, rules.suspicious_exec_exact_severity,
+                       &rules.suspicious_exec_exact_count, MAX_RULES, exec_exact[i], EDR_SEV_WARN);
+    }
+    for (size_t i = 0; i < sizeof(exec_prefix) / sizeof(exec_prefix[0]); i++) {
+        add_rule_value(rules.suspicious_exec_prefix, rules.suspicious_exec_prefix_severity,
+                       &rules.suspicious_exec_prefix_count, MAX_RULES, exec_prefix[i], EDR_SEV_WARN);
+    }
+    for (size_t i = 0; i < sizeof(read_paths) / sizeof(read_paths[0]); i++) {
+        add_path_rule(rules.sensitive_read, rules.sensitive_read_severity,
+                      &rules.sensitive_read_count, MAX_RULES, read_paths[i], EDR_SEV_WARN);
+    }
+    for (size_t i = 0; i < sizeof(write_paths) / sizeof(write_paths[0]); i++) {
+        add_path_rule(rules.sensitive_write, rules.sensitive_write_severity,
+                      &rules.sensitive_write_count, MAX_RULES, write_paths[i], EDR_SEV_CRITICAL);
+    }
+    for (size_t i = 0; i < sizeof(jit_allow) / sizeof(jit_allow[0]); i++) {
+        add_comm_rule(rules.jit_allow_comm, &rules.jit_allow_comm_count, MAX_RULES, jit_allow[i]);
+    }
+    for (size_t i = 0; i < sizeof(ports) / sizeof(ports[0]); i++) {
+        add_port_rule(rules.suspicious_ports, rules.suspicious_port_severity,
+                      &rules.suspicious_port_count, MAX_RULES, ports[i], EDR_SEV_WARN);
+    }
+}
+
+static char *trim(char *value) {
+    while (*value == ' ' || *value == '\t' || *value == '\n' || *value == '\r') {
+        value++;
+    }
+    char *end = value + strlen(value);
+    while (end > value && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\n' || end[-1] == '\r')) {
+        *--end = '\0';
+    }
+    return value;
+}
+
+static bool load_rules_file(const char *path, bool required) {
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        if (required) {
+            fprintf(stderr, "failed to open config %s: %s\n", path, strerror(errno));
+            return false;
+        }
+        return true;
+    }
+
+    char line[512];
+    unsigned int line_no = 0;
+    bool valid = true;
+    while (fgets(line, sizeof(line), f)) {
+        line_no++;
+        char *entry = trim(line);
+        if (entry[0] == '\0' || entry[0] == '#') {
+            continue;
+        }
+
+        char *eq = strchr(entry, '=');
+        if (!eq) {
+            fprintf(stderr, "invalid config line %u in %s\n", line_no, path);
+            valid = false;
+            continue;
+        }
+        *eq = '\0';
+        char *key = trim(entry);
+        char *value = trim(eq + 1);
+        if (value[0] == '\0') {
+            continue;
+        }
+
+        if (strcmp(key, "suspicious_exec_exact") == 0) {
+            enum edr_severity severity;
+            char *rule_value = NULL;
+            if (!split_rule_value(value, EDR_SEV_WARN, &rule_value, &severity)) {
+                fprintf(stderr, "invalid suspicious_exec_exact on line %u in %s\n", line_no, path);
+                valid = false;
+                continue;
+            }
+            if (!add_rule_value(rules.suspicious_exec_exact, rules.suspicious_exec_exact_severity,
+                                &rules.suspicious_exec_exact_count, MAX_RULES, rule_value, severity)) {
+                fprintf(stderr, "too many suspicious_exec_exact rules on line %u in %s\n", line_no, path);
+                valid = false;
+            }
+        } else if (strcmp(key, "disable_suspicious_exec_exact") == 0) {
+            remove_rule_value(rules.suspicious_exec_exact, rules.suspicious_exec_exact_severity,
+                              &rules.suspicious_exec_exact_count, value);
+        } else if (strcmp(key, "suspicious_exec_prefix") == 0) {
+            enum edr_severity severity;
+            char *rule_value = NULL;
+            if (!split_rule_value(value, EDR_SEV_WARN, &rule_value, &severity)) {
+                fprintf(stderr, "invalid suspicious_exec_prefix on line %u in %s\n", line_no, path);
+                valid = false;
+                continue;
+            }
+            if (!add_rule_value(rules.suspicious_exec_prefix, rules.suspicious_exec_prefix_severity,
+                                &rules.suspicious_exec_prefix_count, MAX_RULES, rule_value, severity)) {
+                fprintf(stderr, "too many suspicious_exec_prefix rules on line %u in %s\n", line_no, path);
+                valid = false;
+            }
+        } else if (strcmp(key, "disable_suspicious_exec_prefix") == 0) {
+            remove_rule_value(rules.suspicious_exec_prefix, rules.suspicious_exec_prefix_severity,
+                              &rules.suspicious_exec_prefix_count, value);
+        } else if (strcmp(key, "sensitive_read") == 0) {
+            enum edr_severity severity;
+            char *rule_value = NULL;
+            if (!split_rule_value(value, EDR_SEV_WARN, &rule_value, &severity)) {
+                fprintf(stderr, "invalid sensitive_read on line %u in %s\n", line_no, path);
+                valid = false;
+                continue;
+            }
+            if (!add_path_rule(rules.sensitive_read, rules.sensitive_read_severity,
+                               &rules.sensitive_read_count, MAX_RULES, rule_value, severity)) {
+                fprintf(stderr, "too many sensitive_read rules on line %u in %s\n", line_no, path);
+                valid = false;
+            }
+        } else if (strcmp(key, "disable_sensitive_read") == 0) {
+            remove_path_rule(rules.sensitive_read, rules.sensitive_read_severity,
+                             &rules.sensitive_read_count, value);
+        } else if (strcmp(key, "sensitive_write") == 0) {
+            enum edr_severity severity;
+            char *rule_value = NULL;
+            if (!split_rule_value(value, EDR_SEV_CRITICAL, &rule_value, &severity)) {
+                fprintf(stderr, "invalid sensitive_write on line %u in %s\n", line_no, path);
+                valid = false;
+                continue;
+            }
+            if (!add_path_rule(rules.sensitive_write, rules.sensitive_write_severity,
+                               &rules.sensitive_write_count, MAX_RULES, rule_value, severity)) {
+                fprintf(stderr, "too many sensitive_write rules on line %u in %s\n", line_no, path);
+                valid = false;
+            }
+        } else if (strcmp(key, "disable_sensitive_write") == 0) {
+            remove_path_rule(rules.sensitive_write, rules.sensitive_write_severity,
+                             &rules.sensitive_write_count, value);
+        } else if (strcmp(key, "jit_allow_comm") == 0) {
+            if (!add_comm_rule(rules.jit_allow_comm, &rules.jit_allow_comm_count, MAX_RULES, value)) {
+                fprintf(stderr, "too many jit_allow_comm rules on line %u in %s\n", line_no, path);
+                valid = false;
+            }
+        } else if (strcmp(key, "disable_jit_allow_comm") == 0) {
+            remove_comm_rule(rules.jit_allow_comm, &rules.jit_allow_comm_count, value);
+        } else if (strcmp(key, "suspicious_port") == 0) {
+            enum edr_severity severity;
+            char *rule_value = NULL;
+            if (!split_rule_value(value, EDR_SEV_WARN, &rule_value, &severity) ||
+                !add_port_rule(rules.suspicious_ports, rules.suspicious_port_severity,
+                               &rules.suspicious_port_count, MAX_RULES, rule_value, severity)) {
+                fprintf(stderr, "invalid suspicious_port '%s' on line %u in %s\n", value, line_no, path);
+                valid = false;
+            }
+        } else if (strcmp(key, "disable_suspicious_port") == 0) {
+            if (!remove_port_rule(rules.suspicious_ports, rules.suspicious_port_severity,
+                                  &rules.suspicious_port_count, value)) {
+                fprintf(stderr, "invalid disable_suspicious_port '%s' on line %u in %s\n", value, line_no, path);
+                valid = false;
+            }
+        } else if (strcmp(key, "dedup_window_seconds") == 0) {
+            uint64_t seconds = 0;
+            if (!parse_u64(value, &seconds) || seconds > UINT64_MAX / NS_PER_SECOND) {
+                fprintf(stderr, "invalid dedup_window_seconds '%s' on line %u in %s\n", value, line_no, path);
+                valid = false;
+                continue;
+            }
+            rules.dedup_window_ns = seconds * NS_PER_SECOND;
+        } else if (strcmp(key, "min_severity") == 0) {
+            enum edr_severity severity = EDR_SEV_WARN;
+            if (!parse_severity(value, &severity)) {
+                fprintf(stderr, "invalid min_severity '%s' on line %u in %s\n", value, line_no, path);
+                valid = false;
+                continue;
+            }
+            rules.min_severity = severity;
+        } else {
+            fprintf(stderr, "unknown config key '%s' on line %u in %s\n", key, line_no, path);
+            valid = false;
+        }
+    }
+
+    fclose(f);
+    return valid;
+}
+
+static void strip_newline(char *value) {
+    value[strcspn(value, "\r\n")] = '\0';
+}
+
+static void read_proc_link(uint32_t pid, const char *name, char *dst, size_t dst_size) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%u/%s", pid, name);
+
+    ssize_t n = readlink(path, dst, dst_size - 1);
+    if (n < 0) {
+        dst[0] = '\0';
+        return;
+    }
+    dst[n] = '\0';
+}
+
+static bool has_deleted_suffix(const char *path) {
+    size_t len = strlen(path);
+    const char suffix[] = " (deleted)";
+    size_t suffix_len = sizeof(suffix) - 1;
+
+    return len >= suffix_len && strcmp(path + len - suffix_len, suffix) == 0;
+}
+
+static bool has_path_prefix(const char *path, const char *prefix) {
+    return strncmp(path, prefix, strlen(prefix)) == 0;
+}
+
+static bool is_writable_exe_path(const char *path) {
+    return has_path_prefix(path, "/tmp/") ||
+           has_path_prefix(path, "/var/tmp/") ||
+           has_path_prefix(path, "/dev/shm/") ||
+           has_path_prefix(path, "/home/");
+}
+
+static void read_proc_exe_metadata(uint32_t pid, struct process_context *proc) {
+    char path[64];
+    struct stat st;
+
+    snprintf(path, sizeof(path), "/proc/%u/exe", pid);
+    if (stat(path, &st) != 0) {
+        return;
+    }
+
+    proc->exe_dev = (unsigned long long)st.st_dev;
+    proc->exe_inode = (unsigned long long)st.st_ino;
+    proc->exe_mode = (unsigned int)st.st_mode;
+    proc->exe_uid = (unsigned int)st.st_uid;
+    proc->exe_gid = (unsigned int)st.st_gid;
+    proc->exe_mtime = (long long)st.st_mtime;
+}
+
+static void read_proc_comm(uint32_t pid, char *dst, size_t dst_size) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%u/comm", pid);
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        dst[0] = '\0';
+        return;
+    }
+
+    if (!fgets(dst, dst_size, f)) {
+        dst[0] = '\0';
+    }
+    strip_newline(dst);
+    fclose(f);
+}
+
+static uint32_t read_proc_ppid(uint32_t pid) {
+    char path[64];
+    char line[256];
+    snprintf(path, sizeof(path), "/proc/%u/status", pid);
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return 0;
+    }
+
+    uint32_t ppid = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "PPid:\t%u", &ppid) == 1) {
             break;
         }
     }
-    if (!me_dev) printf("[ASIC] WARNING: Intel ME PCI Device (00:16.0) not found!\n");
+    fclose(f);
+    return ppid;
 }
 
-void save_progress() {
-    FILE *f = fopen("../data/crypto_progress.bin", "wb");
-    if (f) {
-        fwrite(&total_traces_processed, sizeof(float), 1, f);
-        fclose(f);
+static void read_proc_cmdline(uint32_t pid, char *dst, size_t dst_size) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%u/cmdline", pid);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        dst[0] = '\0';
+        return;
     }
-}
 
-void load_progress() {
-    FILE *f = fopen("../data/crypto_progress.bin", "rb");
-    if (f) {
-        fread(&total_traces_processed, sizeof(float), 1, f);
-        fclose(f);
-        printf("[ASIC] Resuming from %.0f traces.\n", total_traces_processed);
-        fflush(stdout);
+    size_t n = fread(dst, 1, dst_size - 1, f);
+    fclose(f);
+    if (n == 0) {
+        dst[0] = '\0';
+        return;
     }
-}
 
-void sig_handler(int sig) { 
-    if (sig == SIGINT) stop = 1; 
-    else if (sig == SIGUSR1) {
-        hammer_mode = !hammer_mode;
-        if (hammer_mode) printf("[HAMMER: ON]\n");
-        else printf("[HAMMER: OFF]\n");
-        fflush(stdout);
-    } else if (sig == SIGUSR2) {
-        vault_locked = !vault_locked;
-        if (vault_locked) printf("[VAULT] LOCKED\n");
-        else printf("[VAULT] UNLOCKED\n");
-        fflush(stdout);
-    }
-}
-
-// Node positioning for triangulation (Dynamic loading from .nodes.conf)
-float node_coords[10][2] = {
-    {0.0, 0.0}, {100.0, 0.0}, {0.0, 100.0}, {100.0, 100.0},
-    {50.0, 50.0}, {20.0, 80.0}, {80.0, 20.0}, {10.0, 10.0},
-    {90.0, 90.0}, {50.0, 0.0}
-};
-
-void load_node_config() {
-    FILE *f = fopen(".nodes.conf", "r");
-    if (f) {
-        int id; float x, y;
-        while (fscanf(f, "%d %f %f", &id, &x, &y) == 3) {
-            if (id >= 0 && id < 10) {
-                node_coords[id][0] = x;
-                node_coords[id][1] = y;
-            }
+    for (size_t i = 0; i < n; i++) {
+        if (dst[i] == '\0') {
+            dst[i] = ' ';
         }
-        fclose(f);
-        printf("[ASIC] Loaded Dynamic Swarm Coordinates.\n");
+    }
+    while (n > 0 && dst[n - 1] == ' ') {
+        n--;
+    }
+    dst[n] = '\0';
+}
+
+static void enrich_process(uint32_t pid, struct process_context *proc) {
+    memset(proc, 0, sizeof(*proc));
+    proc->ppid = read_proc_ppid(pid);
+    read_proc_comm(proc->ppid, proc->parent_comm, sizeof(proc->parent_comm));
+    read_proc_link(pid, "exe", proc->exe, sizeof(proc->exe));
+    proc->exe_deleted = has_deleted_suffix(proc->exe);
+    proc->exe_writable_path = is_writable_exe_path(proc->exe);
+    read_proc_exe_metadata(pid, proc);
+    read_proc_link(pid, "cwd", proc->cwd, sizeof(proc->cwd));
+    read_proc_cmdline(pid, proc->cmdline, sizeof(proc->cmdline));
+}
+
+static const char *event_name(uint32_t type) {
+    switch (type) {
+    case EDR_EVENT_EXEC:
+        return "EXEC";
+    case EDR_EVENT_MPROTECT:
+        return "MPROTECT";
+    case EDR_EVENT_MMAP:
+        return "MMAP";
+    case EDR_EVENT_OPENAT:
+        return "OPENAT";
+    case EDR_EVENT_CONNECT:
+        return "CONNECT";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static bool contains_rule(const char *haystack, char ruleset[][EDR_MAX_TARGET],
+                          enum edr_severity severities[], size_t rule_count,
+                          enum edr_severity *severity) {
+    for (size_t i = rule_count; i > 0; i--) {
+        size_t idx = i - 1;
+        if (strstr(haystack, ruleset[idx]) != NULL) {
+            *severity = severities[idx];
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool comm_allowed_for_jit(const char *comm) {
+    for (size_t i = 0; i < rules.jit_allow_comm_count; i++) {
+        if (strncmp(comm, rules.jit_allow_comm[i], sizeof(rules.jit_allow_comm[i])) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *basename_ptr(const char *path) {
+    const char *base = strrchr(path, '/');
+    return base ? base + 1 : path;
+}
+
+static bool is_suspicious_exec(const char *target, enum edr_severity *severity) {
+    const char *base = basename_ptr(target);
+    for (size_t i = rules.suspicious_exec_exact_count; i > 0; i--) {
+        size_t idx = i - 1;
+        if (strcmp(base, rules.suspicious_exec_exact[idx]) == 0) {
+            *severity = rules.suspicious_exec_exact_severity[idx];
+            return true;
+        }
+    }
+    for (size_t i = rules.suspicious_exec_prefix_count; i > 0; i--) {
+        size_t idx = i - 1;
+        if (strncmp(base, rules.suspicious_exec_prefix[idx], strlen(rules.suspicious_exec_prefix[idx])) == 0) {
+            *severity = rules.suspicious_exec_prefix_severity[idx];
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool is_sensitive_read_file(const char *target, enum edr_severity *severity) {
+    return contains_rule(target, rules.sensitive_read, rules.sensitive_read_severity,
+                         rules.sensitive_read_count, severity);
+}
+
+static bool is_sensitive_write_file(const char *target, enum edr_severity *severity) {
+    return contains_rule(target, rules.sensitive_write, rules.sensitive_write_severity,
+                         rules.sensitive_write_count, severity);
+}
+
+static bool opens_for_write(uint32_t flags) {
+    int access_mode = flags & O_ACCMODE;
+    return access_mode == O_WRONLY || access_mode == O_RDWR || (flags & O_TRUNC) || (flags & O_CREAT);
+}
+
+static uint16_t event_dst_port(const struct edr_event *e) {
+    return ntohs(e->net_port);
+}
+
+static bool is_suspicious_port(uint16_t port, enum edr_severity *severity) {
+    for (size_t i = rules.suspicious_port_count; i > 0; i--) {
+        size_t idx = i - 1;
+        if (rules.suspicious_ports[idx] == port) {
+            *severity = rules.suspicious_port_severity[idx];
+            return true;
+        }
+    }
+    return false;
+}
+
+static void format_net_addr(const struct edr_event *e, char *dst, size_t dst_size) {
+    if (e->net_family == AF_INET) {
+        struct in_addr addr = {
+            .s_addr = e->net_addr_v4,
+        };
+        if (inet_ntop(AF_INET, &addr, dst, dst_size)) {
+            return;
+        }
+    } else if (e->net_family == AF_INET6) {
+        if (inet_ntop(AF_INET6, e->net_addr_v6, dst, dst_size)) {
+            return;
+        }
+    }
+
+    if (dst_size > 0) {
+        dst[0] = '\0';
+    }
+}
+
+static struct edr_finding evaluate_event(const struct edr_event *e) {
+    enum edr_severity severity = EDR_SEV_INFO;
+
+    if (e->type == EDR_EVENT_EXEC && is_suspicious_exec(e->target, &severity)) {
+        return (struct edr_finding){severity, "suspicious process execution"};
+    }
+
+    if (e->type == EDR_EVENT_MPROTECT && (e->prot & PROT_EXEC) && !comm_allowed_for_jit(e->comm)) {
+        if (e->prot & PROT_WRITE) {
+            return (struct edr_finding){EDR_SEV_CRITICAL, "RWX memory request"};
+        }
+        return (struct edr_finding){EDR_SEV_WARN, "mprotect executable memory request"};
+    }
+
+    if (e->type == EDR_EVENT_MMAP && (e->prot & PROT_EXEC) && !comm_allowed_for_jit(e->comm)) {
+        if (e->prot & PROT_WRITE) {
+            return (struct edr_finding){EDR_SEV_CRITICAL, "RWX memory mapping"};
+        }
+        if (e->flags & MAP_ANONYMOUS) {
+            return (struct edr_finding){EDR_SEV_WARN, "anonymous executable memory mapping"};
+        }
+    }
+
+    if (e->type == EDR_EVENT_OPENAT) {
+        if (opens_for_write(e->flags) && is_sensitive_write_file(e->target, &severity)) {
+            return (struct edr_finding){severity, "sensitive file opened for write"};
+        }
+        if (is_sensitive_read_file(e->target, &severity)) {
+            return (struct edr_finding){severity, "sensitive file access"};
+        }
+    }
+
+    if (e->type == EDR_EVENT_CONNECT && is_suspicious_port(event_dst_port(e), &severity)) {
+        return (struct edr_finding){severity, "connection to suspicious port"};
+    }
+
+    return (struct edr_finding){EDR_SEV_INFO, "observed"};
+}
+
+static void format_event(const struct edr_event *e, const struct process_context *proc,
+                         char *line, size_t line_size) {
+    if (e->type == EDR_EVENT_EXEC) {
+        snprintf(line, line_size,
+                 "pid=%u ppid=%u parent=%s uid=%u comm=%s event=exec target=%.120s exe=%.120s",
+                 e->pid, proc->ppid, proc->parent_comm, e->uid, e->comm, e->target, proc->exe);
+    } else if (e->type == EDR_EVENT_MPROTECT || e->type == EDR_EVENT_MMAP) {
+        snprintf(line, line_size,
+                 "pid=%u ppid=%u parent=%s uid=%u comm=%s event=%s prot=0x%x flags=0x%x exe=%.120s",
+                 e->pid, proc->ppid, proc->parent_comm, e->uid, e->comm,
+                 event_name(e->type), e->prot, e->flags, proc->exe);
+    } else if (e->type == EDR_EVENT_OPENAT) {
+        snprintf(line, line_size,
+                 "pid=%u ppid=%u parent=%s uid=%u comm=%s event=openat flags=0x%x target=%.120s exe=%.120s",
+                 e->pid, proc->ppid, proc->parent_comm, e->uid, e->comm,
+                 e->flags, e->target, proc->exe);
+    } else if (e->type == EDR_EVENT_CONNECT) {
+        char addr[INET6_ADDRSTRLEN] = "";
+        format_net_addr(e, addr, sizeof(addr));
+        snprintf(line, line_size,
+                 "pid=%u ppid=%u parent=%s uid=%u comm=%s event=connect dst=%s:%u exe=%.120s",
+                 e->pid, proc->ppid, proc->parent_comm, e->uid, e->comm,
+                 addr, event_dst_port(e), proc->exe);
     } else {
-        printf("[ASIC] Using Default Static Swarm Coordinates.\n");
+        snprintf(line, line_size, "pid=%u ppid=%u parent=%s uid=%u comm=%s event=unknown type=%u",
+                 e->pid, proc->ppid, proc->parent_comm, e->uid, e->comm, e->type);
     }
 }
 
-void *swarm_listener(void *arg) {
-    int sd = socket(AF_INET, SOCK_DGRAM, 0);
-    int reuse = 1;
-    setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(5000);
-    bind(sd, (struct sockaddr *)&addr, sizeof(addr));
-    struct ip_mreq mreq;
-    mreq.imr_multiaddr.s_addr = inet_addr("239.0.0.1");
-    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    setsockopt(sd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
-    char buf[1024];
-
-    // Tracking for triangulation
-    float peer_strengths[10] = {0};
-    time_t last_alert[10] = {0};
-
-    while (!stop) {
-        int n = recv(sd, buf, sizeof(buf) - 1, 0);
-        if (n > 0) {
-            buf[n] = '\0';
-            if (strncmp(buf, "JAMMING:", 8) == 0) {
-                int p_id; float strength;
-                sscanf(buf + 8, "%d:%f", &p_id, &strength);
-                if (p_id >= 0 && p_id < 10 && p_id != node_id) {
-                    peer_strengths[p_id] = strength;
-                    last_alert[p_id] = time(NULL);
-                    
-                    // Simple weighted triangulation if we have > 2 nodes
-                    int active_nodes = 0;
-                    float tx = 0, ty = 0, tw = 0;
-                    for (int i=0; i<10; i++) {
-                        if (time(NULL) - last_alert[i] < 5) { // within 5 seconds
-                            float weight = pow(10, (peer_strengths[i] + 100)/20.0); // simple inverse log
-                            tx += node_coords[i][0] * weight;
-                            ty += node_coords[i][1] * weight;
-                            tw += weight;
-                            active_nodes++;
-                        }
-                    }
-                    if (active_nodes >= 2) {
-                        printf("[SWARM] L4 TRIANGULATION: Source detected at X:%.1f Y:%.1f (Confidence: %d nodes)\n", tx/tw, ty/tw, active_nodes);
-                        fflush(stdout);
-                    }
-                }
-            } else {
-                printf("[SWARM] Received Vector Drift from Peer\n"); 
-                fflush(stdout); 
-            }
+static void json_escape(FILE *out, const char *value) {
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (*p == '"' || *p == '\\') {
+            fputc('\\', out);
+            fputc(*p, out);
+        } else if (*p >= 0x20 && *p <= 0x7e) {
+            fputc(*p, out);
+        } else {
+            fprintf(out, "\\u%04x", *p);
         }
     }
-    close(sd);
-    return NULL;
 }
 
-void *l4_rf_thread(void *arg) {
-    char cmd[128];
-    snprintf(cmd, sizeof(cmd), "python3 ../scripts/../dev/sensors/rf_sensor.py %s", (char*)arg);
-    FILE *pipe = popen(cmd, "r");
-    if(!pipe) return NULL;
-    char line[128];
-    while(!stop && fgets(line, sizeof(line), pipe)) {
-        if(strncmp(line, "RF_DATA:", 8) == 0) {
-            float signals[10];
-            char *p = line + 8;
-            float max_sig = -100.0f;
-            for(int i=0; i<10; i++) {
-                signals[i] = atof(p);
-                if (signals[i] > max_sig) max_sig = signals[i];
-                p = strchr(p, ',');
-                if (p) p++; else break;
-            }
-            if (max_sig > -45.0f) { // Jamming threshold
-                printf("\033[1;31m[ASIC L4 EW ALERT] JAMMING DETECTED (Max: %.1f dBm)\033[0m\n", max_sig);
-                fflush(stdout);
-                char msg[64];
-                snprintf(msg, sizeof(msg), "JAMMING:%d:%.1f", node_id, max_sig);
-                sendto(swarm_sd, msg, strlen(msg), 0, (struct sockaddr *)&swarm_addr, sizeof(swarm_addr));
-            } else {
-                printf("[ASIC L4 RF] SPECTRUM CLEAN (Max: %.1f dBm)\n", max_sig);
-                fflush(stdout);
-            }
-        }
+static void write_jsonl(FILE *out, const struct edr_event *e,
+                        const struct process_context *proc,
+                        const struct edr_finding *finding,
+                        uint32_t repeat_count) {
+    if (!out) {
+        return;
     }
-    pclose(pipe);
-    return NULL;
+
+    fprintf(out,
+            "{\"timestamp_ns\":%llu,\"event\":\"%s\",\"pid\":%u,\"tid\":%u,"
+            "\"ppid\":%u,\"uid\":%u,\"gid\":%u,\"comm\":\"",
+            (unsigned long long)e->timestamp_ns, event_name(e->type), e->pid, e->tid,
+            proc->ppid, e->uid, e->gid);
+    json_escape(out, e->comm);
+    fprintf(out, "\",\"parent_comm\":\"");
+    json_escape(out, proc->parent_comm);
+    fprintf(out, "\",\"exe\":\"");
+    json_escape(out, proc->exe);
+    fprintf(out, "\",\"cwd\":\"");
+    json_escape(out, proc->cwd);
+    fprintf(out, "\",\"cmdline\":\"");
+    json_escape(out, proc->cmdline);
+    fprintf(out, "\",\"target\":\"");
+    json_escape(out, e->target);
+    char dst_addr[INET6_ADDRSTRLEN] = "";
+    if (e->type == EDR_EVENT_CONNECT) {
+        format_net_addr(e, dst_addr, sizeof(dst_addr));
+    }
+    fprintf(out, "\",\"dst_addr\":\"");
+    json_escape(out, dst_addr);
+    fprintf(out,
+            "\",\"dst_port\":%u,\"prot\":%u,\"flags\":%u,"
+            "\"exe_dev\":%llu,\"exe_inode\":%llu,\"exe_mode\":%u,\"exe_uid\":%u,\"exe_gid\":%u,"
+            "\"exe_mtime\":%lld,\"exe_deleted\":%s,\"exe_writable_path\":%s,"
+            "\"severity\":%d,\"repeat_count\":%u,\"reason\":\"",
+            e->type == EDR_EVENT_CONNECT ? event_dst_port(e) : 0,
+            e->prot, e->flags,
+            proc->exe_dev, proc->exe_inode, proc->exe_mode, proc->exe_uid, proc->exe_gid,
+            proc->exe_mtime, proc->exe_deleted ? "true" : "false",
+            proc->exe_writable_path ? "true" : "false",
+            finding->severity, repeat_count);
+    json_escape(out, finding->reason);
+    fprintf(out, "\"}\n");
+    fflush(out);
 }
 
-extern void* perform_compliance_check(void* arg);
+static bool same_dedup_key(const struct dedup_entry *entry, const struct edr_event *e,
+                           const struct edr_finding *finding) {
+    return entry->active &&
+           entry->type == e->type &&
+           entry->pid == e->pid &&
+           entry->prot == e->prot &&
+           entry->flags == e->flags &&
+           entry->net_family == e->net_family &&
+           entry->net_port == e->net_port &&
+           entry->reason == finding->reason &&
+           strncmp(entry->comm, e->comm, sizeof(entry->comm)) == 0 &&
+           strncmp(entry->target, e->target, sizeof(entry->target)) == 0;
+}
 
-void init_asic() {
-    cl_platform_id platforms[4]; cl_uint n_plat;
-    clGetPlatformIDs(4, platforms, &n_plat);
-    cl_platform_id plat = NULL;
-    for(cl_uint i=0; i<n_plat; i++){
-        char name[128]; clGetPlatformInfo(platforms[i], CL_PLATFORM_NAME, 128, name, NULL);
-        if(strstr(name, "NVIDIA")) { plat = platforms[i]; break; }
+static void emit_finding(struct edr_options *opts, const struct edr_event *e,
+                         const struct edr_finding *finding, uint32_t repeat_count) {
+    struct process_context proc;
+    char line[MAX_EVENT_MESSAGE];
+
+    enrich_process(e->pid, &proc);
+    format_event(e, &proc, line, sizeof(line));
+    add_traffic(line);
+
+    if (finding->severity > EDR_SEV_INFO) {
+        add_alert("EDR", line, finding->severity);
     }
-    cl_device_id dev; clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, 1, &dev, NULL);
-    cl_int err;
-    ctx = clCreateContext(NULL, 1, &dev, NULL, NULL, &err);
-    cmd_q = clCreateCommandQueue(ctx, dev, 0, &err);
 
-    FILE *f = fopen("kernels/qihse_core.cl", "r");
-    fseek(f, 0, SEEK_END); size_t sz = ftell(f);
-    char *src = malloc(sz + 1); rewind(f); fread(src, 1, sz, f); src[sz] = '\0'; fclose(f);
-    cl_program prog = clCreateProgramWithSource(ctx, 1, (const char **)&src, NULL, &err);
-    clBuildProgram(prog, 0, NULL, "-cl-mad-enable -cl-fast-relaxed-math", NULL, NULL);
-    
-    vec_k = clCreateKernel(prog, "qihse_vector_search", &err);
-    mal_k = clCreateKernel(prog, "kp14_correlation_core", &err);
-    intel_k = clCreateKernel(prog, "spectra_intel_core", &err);
-    code_k = clCreateKernel(prog, "code_intelligence_core", &err);
-    priv_k = clCreateKernel(prog, "priv_enforcer", &err);
-    me_k = clCreateKernel(prog, "me_sentry_core", &err);
-    evolution_k = clCreateKernel(prog, "qihse_hebbian_update", &err);
-    me_berserker_k = clCreateKernel(prog, "me_berserker_core", &err);
-    me_finalizer_k = clCreateKernel(prog, "me_correlation_finalizer", &err);
-    entropy_k = clCreateKernel(prog, "qihse_entropy_analyzer", &err);
-    super_k = clCreateKernel(prog, "qihse_superposition_match", &err);
-    hammer_k = clCreateKernel(prog, "me_hammer_core", &err);
-    blackbox_k = clCreateKernel(prog, "blackbox_append", &err);
-    
-    dev_mal_sigs = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(mal_sigs), mal_sigs, NULL);
-    dev_intel_keywords = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(intel_keywords), intel_keywords, NULL);
-    dev_codebase = clCreateBuffer(ctx, CL_MEM_READ_WRITE, MAX_CODE_SNIPPETS * 160 * sizeof(float), NULL, NULL);
-    dev_masks = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(threat_masks), threat_masks, NULL);
-    blackbox_mem = clCreateBuffer(ctx, CL_MEM_READ_WRITE, BLACKBOX_SIZE, NULL, NULL);
-    
-    dev_sum_x = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(float) * NUM_HYPOTHESES, NULL, NULL);
-    dev_sum_xy = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(float) * NUM_HYPOTHESES, NULL, NULL);
-    dev_sum_x2 = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(float) * NUM_HYPOTHESES, NULL, NULL);
-
-    // POOL INITIALIZATION
-    dev_event_q = clCreateBuffer(ctx, CL_MEM_READ_ONLY, VECTOR_DIMS * sizeof(float), NULL, NULL);
-    dev_event_scores = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, MAX_DB_SIZE * sizeof(float), NULL, NULL);
-    dev_event_alert_me = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(int), NULL, NULL);
-    dev_event_alert_priv = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(int), NULL, NULL);
-    dev_pmc_entropy = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, PMC_WINDOW * sizeof(float), NULL, NULL);
-    dev_event_payload = clCreateBuffer(ctx, CL_MEM_READ_ONLY, MAX_PAYLOAD, NULL, NULL);
-    dev_event_dr = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, sizeof(int)*NUM_MASKS, NULL, NULL);
-
-    swarm_sd = socket(AF_INET, SOCK_DGRAM, 0);
-    memset(&swarm_addr, 0, sizeof(swarm_addr));
-    swarm_addr.sin_family = AF_INET;
-    swarm_addr.sin_addr.s_addr = inet_addr("239.0.0.1");
-    swarm_addr.sin_port = htons(5000);
-    
-    FILE *db_f = fopen("threat_tensors.bin", "rb");
-    if(db_f) { 
-        fseek(db_f, 0, SEEK_END);
-        long f_size = ftell(db_f);
-        rewind(db_f);
-        actual_db_size = f_size / (VECTOR_DIMS * sizeof(float));
-        if (actual_db_size > MAX_DB_SIZE) actual_db_size = MAX_DB_SIZE;
-        printf("[ASIC] Loaded %d Threat Tensors from DB.\n", actual_db_size);
+    if (!opts || opts->console) {
+        fprintf(stdout, "[EDR%s] %s repeat_count=%u%s%s\n",
+                finding->severity > EDR_SEV_INFO ? " ALERT" : "",
+                line,
+                repeat_count,
+                finding->severity > EDR_SEV_INFO ? " reason=" : "",
+                finding->severity > EDR_SEV_INFO ? finding->reason : "");
         fflush(stdout);
-
-        float *h_db = (float *)malloc(actual_db_size * VECTOR_DIMS * sizeof(float));
-        fread(h_db, sizeof(float), actual_db_size * VECTOR_DIMS, db_f); 
-        fclose(db_f); 
-        // Using CL_MEM_USE_HOST_PTR for faster initial load on Fermi
-        db_vectors_mem = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, actual_db_size * VECTOR_DIMS * sizeof(float), h_db, NULL);
-        free(h_db);
-    } else {
-        printf("[ASIC] WARNING: No Threat DB found! Creating empty buffer.\n");
-        actual_db_size = 0;
-        db_vectors_mem = clCreateBuffer(ctx, CL_MEM_READ_WRITE, 1 * VECTOR_DIMS * sizeof(float), NULL, NULL);
     }
-    
-    float *zeros = calloc(NUM_HYPOTHESES, sizeof(float));
-    clEnqueueWriteBuffer(cmd_q, dev_sum_x, CL_TRUE, 0, sizeof(float)*NUM_HYPOTHESES, zeros, 0, NULL, NULL);
-    clEnqueueWriteBuffer(cmd_q, dev_sum_xy, CL_TRUE, 0, sizeof(float)*NUM_HYPOTHESES, zeros, 0, NULL, NULL);
-    clEnqueueWriteBuffer(cmd_q, dev_sum_x2, CL_TRUE, 0, sizeof(float)*NUM_HYPOTHESES, zeros, 0, NULL, NULL);
-    
-    free(zeros); free(src);
-    load_progress();
+
+    if (opts) {
+        write_jsonl(opts->jsonl, e, &proc, finding, repeat_count);
+    }
 }
 
-void *l3_hardware_thread(void *arg) {
-    FILE *pipe = popen("./pmc_sensor", "r");
-    if(!pipe) return NULL;
-    char line[128]; float pmc_window[PMC_WINDOW]; int count = 0;
-    while(!stop && fgets(line, sizeof(line), pipe)) {
-        if(strncmp(line, "PMC_DATA:", 9) == 0) {
-            pmc_window[count++] = atof(line + 9);
-            if(count == PMC_WINDOW) {
-                total_traces_processed += 1.0f;
-                cl_mem dev_pmc = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(pmc_window), pmc_window, NULL);
-                int tw = PMC_WINDOW, nh = NUM_HYPOTHESES;
-                
-                // L3 Entropy Analysis (Side-Channel Detection)
-                clSetKernelArg(entropy_k, 0, sizeof(cl_mem), &dev_pmc);
-                clSetKernelArg(entropy_k, 1, sizeof(cl_mem), &dev_pmc_entropy);
-                int win = PMC_WINDOW / 2;
-                clSetKernelArg(entropy_k, 2, sizeof(int), &win);
-                size_t egws_entropy = ROUND_UP(PMC_WINDOW / 2, lws);
-                clEnqueueNDRangeKernel(cmd_q, entropy_k, 1, NULL, &egws_entropy, &lws, 0, NULL, NULL);
-                float *entropy_res = malloc(sizeof(float) * egws_entropy);
-                clEnqueueReadBuffer(cmd_q, dev_pmc_entropy, CL_TRUE, 0, sizeof(float)*egws_entropy, entropy_res, 0, NULL, NULL);
-                for(int i=0; i<egws_entropy; i++) if(i < (PMC_WINDOW/2) && entropy_res[i] > 1000.0f) printf("\033[1;33m[ASIC L3 ALERT] Cache Anomaly / Side-Channel Detected (Var: %.1f)\033[0m\n", entropy_res[i]);
-                free(entropy_res);
-
-                if (hammer_mode) {
-                    // Hammer Mode: Use float4 vectorized kernel with 8x iterations per trace for 100% spike
-                    int v_nh = NUM_HYPOTHESES / 4;
-                    int v_tw = PMC_WINDOW / 4;
-                    clSetKernelArg(hammer_k, 0, sizeof(cl_mem), &dev_pmc);
-                    clSetKernelArg(hammer_k, 1, sizeof(cl_mem), &dev_sum_x);
-                    clSetKernelArg(hammer_k, 2, sizeof(cl_mem), &dev_sum_xy);
-                    clSetKernelArg(hammer_k, 3, sizeof(cl_mem), &dev_sum_x2);
-                    clSetKernelArg(hammer_k, 4, sizeof(int), &v_tw);
-                    clSetKernelArg(hammer_k, 5, sizeof(int), &v_nh);
-                    size_t gws = ROUND_UP(v_nh, lws);
-                    for(int i=0; i<8; i++) {
-                        clEnqueueNDRangeKernel(cmd_q, hammer_k, 1, NULL, &gws, &lws, 0, NULL, NULL);
-                    }
-                    clFinish(cmd_q);
-                } else {
-                    clSetKernelArg(me_berserker_k, 0, sizeof(cl_mem), &dev_pmc);
-                    clSetKernelArg(me_berserker_k, 1, sizeof(cl_mem), &dev_sum_x);
-                    clSetKernelArg(me_berserker_k, 2, sizeof(cl_mem), &dev_sum_xy);
-                    clSetKernelArg(me_berserker_k, 3, sizeof(cl_mem), &dev_sum_x2);
-                    clSetKernelArg(me_berserker_k, 4, sizeof(int), &tw);
-                    clSetKernelArg(me_berserker_k, 5, sizeof(int), &nh);
-                    size_t gws = ROUND_UP(NUM_HYPOTHESES, lws);
-                    clEnqueueNDRangeKernel(cmd_q, me_berserker_k, 1, NULL, &gws, &lws, 0, NULL, NULL);
-                }
-                
-                if ((int)total_traces_processed % 50 == 0) {
-                    save_progress(); // Persist progress
-
-                    // Path C: Offload Finalization to Fortran HPC logic
-                    float *sx = malloc(sizeof(float)*NUM_HYPOTHESES);
-                    float *sxy = malloc(sizeof(float)*NUM_HYPOTHESES);
-                    float *sx2 = malloc(sizeof(float)*NUM_HYPOTHESES);
-                    float *scores = malloc(sizeof(float)*NUM_HYPOTHESES);
-
-                    clEnqueueReadBuffer(cmd_q, dev_sum_x, CL_TRUE, 0, sizeof(float)*NUM_HYPOTHESES, sx, 0, NULL, NULL);
-                    clEnqueueReadBuffer(cmd_q, dev_sum_xy, CL_TRUE, 0, sizeof(float)*NUM_HYPOTHESES, sxy, 0, NULL, NULL);
-                    clEnqueueReadBuffer(cmd_q, dev_sum_x2, CL_TRUE, 0, sizeof(float)*NUM_HYPOTHESES, sx2, 0, NULL, NULL);
-
-                    me_correlation_finalizer_fortran(sx, sxy, sx2, scores, total_traces_processed, nh);
-
-                    float max_c = 0; int best = 0;
-                    for(int i=0; i<nh; i++) { if(scores[i]>max_c) { max_c=scores[i]; best=i; } }
-                    printf("\033[1;36m[ASIC L6 CRYPTO] Progress: %.0f traces | Best Match: %05X (Corr: %.4f) [HAMMER: %s]\033[0m\n",
-                           total_traces_processed, best, max_c, hammer_mode ? "ON" : "OFF");
-                    printf("[CRYPTO_STATS] %f|%f\n", total_traces_processed, max_c);
-                    fflush(stdout);
-
-                    free(sx); free(sxy); free(sx2); free(scores);
-                }
-
-                clReleaseMemObject(dev_pmc);
-                count = 0;
-            }
-        }
-    }
-    pclose(pipe); return NULL;
+static void clear_dedup_entry(struct dedup_entry *entry) {
+    memset(entry, 0, sizeof(*entry));
 }
 
+static void emit_dedup_entry(struct edr_options *opts, struct dedup_entry *entry) {
+    if (!entry->active || entry->repeat_count == 0) {
+        clear_dedup_entry(entry);
+        return;
+    }
 
-void *me_activator_thread(void *arg) {
-    // Intel ME Client GUIDs
-    unsigned char guid_amt[16] = {0x65, 0x39, 0x23, 0xAF, 0xCA, 0xFB, 0x81, 0x41, 0x91, 0xC3, 0x2B, 0x24, 0xED, 0x7A, 0x6A, 0x47};
-    unsigned char guid_icc[16] = {0x65, 0xF3, 0x0D, 0xD6, 0x0D, 0xD0, 0x53, 0x44, 0x97, 0x91, 0x05, 0xD4, 0xAF, 0x83, 0x34, 0x61};
-    
-    unsigned char payloads[4][4] = {
-        {0x01, 0x00, 0x00, 0x00}, // Standard Ping
-        {0x02, 0x05, 0x01, 0x00}, // Get Version
-        {0x03, 0x01, 0x00, 0x02}, // Power State
-        {0x08, 0xFF, 0xEE, 0xDD}  // Extended Telemetry
+    struct edr_finding finding = {
+        .severity = entry->severity,
+        .reason = entry->reason,
     };
-    int p_idx = 0;
-
-    while (!stop) {
-        int fd = open("/dev/mei0", O_RDWR);
-        if (fd >= 0) {
-            if (hammer_mode) {
-                // 1. Multi-Client Context Switching (Triggers ME Microkernel overhead)
-                // Connect to AMT HI Client
-                ioctl(fd, 0xc0104801, guid_amt); // IOCTL_MEI_CONNECT_CLIENT
-                write(fd, payloads[p_idx], 4);
-                
-                // Switch to ICC Client
-                ioctl(fd, 0xc0104801, guid_icc); 
-                write(fd, payloads[(p_idx + 1) % 4], 4);
-
-                // 2. PCI Config Space Hammering (Triggers bus-level leakage)
-                // We rapidly read the ME Device Vendor ID to trigger side-channel leakage
-                if (me_dev) {
-                    for(int i=0; i<10; i++) pci_read_long(me_dev, 0);
-                }
-
-                p_idx = (p_idx + 1) % 4;
-            } else {
-                write(fd, payloads[0], 4);
-            }
-            close(fd);
-        }
-        // Hammer Mode: 20Hz Multi-Client Burst vs 2Hz Scalar
-        usleep(hammer_mode ? 50000 : 500000); 
-    }
-    return NULL;
+    emit_finding(opts, &entry->event, &finding, entry->repeat_count);
+    clear_dedup_entry(entry);
 }
 
-void save_db() {
-    FILE *f = fopen("threat_tensors.bin", "wb");
-    if (f) {
-        float *h_db = malloc(actual_db_size * VECTOR_DIMS * sizeof(float));
-        clEnqueueReadBuffer(cmd_q, db_vectors_mem, CL_TRUE, 0, actual_db_size * VECTOR_DIMS * sizeof(float), h_db, 0, NULL, NULL);
-        fwrite(h_db, sizeof(float), actual_db_size * VECTOR_DIMS, f);
-        fclose(f);
-        free(h_db);
-        printf("[ASIC] Threat Tensor DB Persisted to Disk.\n");
-        fflush(stdout);
+static bool suppress_duplicate(struct edr_options *opts, const struct edr_event *e,
+                               const struct edr_finding *finding) {
+    for (size_t i = 0; i < DEDUP_ENTRIES; i++) {
+        struct dedup_entry *entry = &dedup_cache[i];
+        if (same_dedup_key(entry, e, finding)) {
+            if (rules.dedup_window_ns > 0 && e->timestamp_ns - entry->last_seen_ns < rules.dedup_window_ns) {
+                entry->last_seen_ns = e->timestamp_ns;
+                entry->repeat_count++;
+                return true;
+            }
+            emit_dedup_entry(opts, entry);
+            return false;
+        }
+    }
+
+    struct dedup_entry *entry = &dedup_cache[dedup_cursor++ % DEDUP_ENTRIES];
+    if (entry->active && entry->repeat_count > 0) {
+        emit_dedup_entry(opts, entry);
+    }
+    entry->active = true;
+    entry->type = e->type;
+    entry->pid = e->pid;
+    entry->prot = e->prot;
+    entry->flags = e->flags;
+    entry->net_family = e->net_family;
+    entry->net_port = e->net_port;
+    entry->last_seen_ns = e->timestamp_ns;
+    entry->repeat_count = 0;
+    entry->event = *e;
+    entry->reason = finding->reason;
+    entry->severity = finding->severity;
+    snprintf(entry->comm, sizeof(entry->comm), "%s", e->comm);
+    snprintf(entry->target, sizeof(entry->target), "%s", e->target);
+    return false;
+}
+
+static void flush_dedup_cache(struct edr_options *opts) {
+    for (size_t i = 0; i < DEDUP_ENTRIES; i++) {
+        emit_dedup_entry(opts, &dedup_cache[i]);
     }
 }
 
-void *code_intelligence_thread(void *arg) {
-    const char *pipe_path = "/tmp/asic_code_feed";
-    mkfifo(pipe_path, 0666);
-    int fd = open(pipe_path, O_RDONLY);
-    float vector[VECTOR_DIMS];
-    while (!stop) {
-        if (read(fd, vector, sizeof(vector)) == sizeof(vector)) {
-            // Optimized Fermi stage: Use READ_ONLY for constants
-            cl_mem dv = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(vector), vector, NULL);
-            cl_mem ds = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, sizeof(float) * MAX_CODE_SNIPPETS, NULL, NULL);
-            int n = MAX_CODE_SNIPPETS;
-            clSetKernelArg(code_k, 0, sizeof(cl_mem), &dev_codebase);
-            clSetKernelArg(code_k, 1, sizeof(cl_mem), &dv);
-            clSetKernelArg(code_k, 2, sizeof(cl_mem), &ds);
-            clSetKernelArg(code_k, 3, sizeof(int), &n);
-            size_t gws = ROUND_UP(MAX_CODE_SNIPPETS, lws);
-            clEnqueueNDRangeKernel(cmd_q, code_k, 1, NULL, &gws, &lws, 0, NULL, NULL);
-            float *scores = malloc(sizeof(float) * n);
-            clEnqueueReadBuffer(cmd_q, ds, CL_TRUE, 0, sizeof(float) * n, scores, 0, NULL, NULL);
-            float ms = 0; for(int i=0; i<n; i++) if(scores[i]>ms) ms=scores[i];
-            if (ms > 0.85f) printf("\033[1;33m[ASIC L2+ INTEL] Semantic Code Match Detected! (%.2f)\033[0m\n", ms);
-            free(scores); clReleaseMemObject(dv); clReleaseMemObject(ds);
-            
-            // Also update codebase (Hebbian offloading)
-            static int codebase_ptr = 0;
-            clEnqueueWriteBuffer(cmd_q, dev_codebase, CL_FALSE, codebase_ptr * sizeof(vector), sizeof(vector), vector, 0, NULL, NULL);
-            codebase_ptr = (codebase_ptr + 1) % MAX_CODE_SNIPPETS;
-        }
-        usleep(10000);
+static int handle_event(void *ctx, void *data, size_t data_sz) {
+    struct edr_options *opts = ctx;
+    if (data_sz < sizeof(struct edr_event)) {
+        return 0;
     }
-    close(fd); return NULL;
-}
 
-int handle_event(void *cb_ctx, void *data, size_t data_sz) {
-    struct asic_event *e = data;
+    struct edr_event *e = data;
+    struct edr_finding finding = evaluate_event(e);
 
-    // 1. Blackbox Logging (Hot Path VRAM Circular Buffer)
-    clEnqueueWriteBuffer(cmd_q, dev_event_payload, CL_TRUE, 0, MAX_PAYLOAD, e->payload, 0, NULL, NULL);
-    clSetKernelArg(blackbox_k, 0, sizeof(cl_mem), &blackbox_mem);
-    clSetKernelArg(blackbox_k, 1, sizeof(cl_mem), &dev_event_payload);
-    clSetKernelArg(blackbox_k, 2, sizeof(int), &blackbox_offset);
-    int bs = BLACKBOX_SIZE, ds_val = MAX_PAYLOAD;
-    clSetKernelArg(blackbox_k, 3, sizeof(int), &bs);
-    clSetKernelArg(blackbox_k, 4, sizeof(int), &ds_val);
-    size_t bb_gws = ROUND_UP(MAX_PAYLOAD, lws);
-    clEnqueueNDRangeKernel(cmd_q, blackbox_k, 1, NULL, &bb_gws, &lws, 0, NULL, NULL);
-    blackbox_offset = (blackbox_offset + MAX_PAYLOAD) % BLACKBOX_SIZE;
-
-    if (e->type == EVENT_NET) {
-        printf("[TRAFFIC] L1_EDGE | %02X %02X %02X %02X %02X...\n", (unsigned char)e->payload[0], (unsigned char)e->payload[1], (unsigned char)e->payload[2], (unsigned char)e->payload[3], (unsigned char)e->payload[4]);
-    } else if (e->type == EVENT_EXEC) {
-        printf("[TRAFFIC] L2_EDR  | %s -> %s\n", e->comm, e->payload);
-        
-        // Dispatch to PrivEnforcer Kernel (UIV + Lineage)
-        int alert = 0;
-        clEnqueueWriteBuffer(cmd_q, dev_event_alert_priv, CL_TRUE, 0, sizeof(int), &alert, 0, NULL, NULL);
-        clSetKernelArg(priv_k, 0, sizeof(int), &e->uid);
-        clSetKernelArg(priv_k, 1, sizeof(int), &e->loginuid); 
-        clSetKernelArg(priv_k, 2, sizeof(int), &e->has_tty);
-        clSetKernelArg(priv_k, 3, sizeof(int), &e->puid);
-        clSetKernelArg(priv_k, 4, sizeof(cl_mem), &dev_event_alert_priv);
-        size_t pgws = 1; clEnqueueNDRangeKernel(cmd_q, priv_k, 1, NULL, &pgws, NULL, 0, NULL, NULL);
-        clEnqueueReadBuffer(cmd_q, dev_event_alert_priv, CL_TRUE, 0, sizeof(int), &alert, 0, NULL, NULL);
-        
-        if (alert == 1) {
-            printf("\033[1;31;5m[ASIC PRIV ALERT] UNAUTHORIZED ELEVATION (Suspicious Lineage): %s!\033[0m\n", e->comm);
-        } else if (alert == 2) {
-            printf("\033[1;32m[ASIC PRIV INFO] Authorized Admin Action (UID 0): %s\033[0m\n", e->comm);
-        } else if (alert == 3) {
-            printf("\033[1;34m[ASIC PRIV INFO] System Auth (Background/Root-Init): %s\033[0m\n", e->comm);
-        }
-
-    } else if (e->type == EVENT_ME) {
-        printf("[TRAFFIC] L3_ME   | HECI MSG: %02X %02X %02X %02X\n", (unsigned char)e->payload[0], (unsigned char)e->payload[1], (unsigned char)e->payload[2], (unsigned char)e->payload[3]);
-        
-        // Dispatch to ME Sentry Kernel (Pre-allocated)
-        int alert = 0;
-        clEnqueueWriteBuffer(cmd_q, dev_event_alert_me, CL_TRUE, 0, sizeof(int), &alert, 0, NULL, NULL);
-        clSetKernelArg(me_k, 0, sizeof(cl_mem), &dev_event_payload);
-        clSetKernelArg(me_k, 1, sizeof(cl_mem), &dev_event_alert_me);
-        size_t mgws = 1; clEnqueueNDRangeKernel(cmd_q, me_k, 1, NULL, &mgws, NULL, 0, NULL, NULL);
-        clEnqueueReadBuffer(cmd_q, dev_event_alert_me, CL_TRUE, 0, sizeof(int), &alert, 0, NULL, NULL);
-        if (alert) printf("\033[1;31m[ASIC L3+ ME ALERT] Unauthorized Management Engine Command Detected!\033[0m\n");
+    if (e->type == EDR_EVENT_EXEC) {
+        g_telemetry.exec_events++;
+    } else if (e->type == EDR_EVENT_MPROTECT || e->type == EDR_EVENT_MMAP) {
+        g_telemetry.mem_events++;
+    } else if (e->type == EDR_EVENT_OPENAT) {
+        g_telemetry.file_events++;
+    } else if (e->type == EDR_EVENT_CONNECT) {
+        g_telemetry.net_events++;
     }
-    fflush(stdout);
 
-    if (e->type == EVENT_NET || e->type == EVENT_EXEC) {
-        float q[VECTOR_DIMS] = {0.0f};
-        for(int i=0; i<MAX_PAYLOAD && i < 160; i++) {
-            unsigned char b = (unsigned char)e->payload[i];
-            if(b == 0 && e->type == EVENT_EXEC) break; // exec payloads are strings
-            q[b % VECTOR_DIMS] += 1.0f;
-        }
-        float q_norm = 0.0f;
-        for(int i=0; i<VECTOR_DIMS; i++) q_norm += q[i]*q[i];
-        if(q_norm > 0) {
-            q_norm = sqrt(q_norm);
-            for(int i=0; i<VECTOR_DIMS; i++) q[i] /= q_norm;
-        }
-        // Use Pre-allocated Hot Path Buffers
-        clEnqueueWriteBuffer(cmd_q, dev_event_q, CL_TRUE, 0, sizeof(q), q, 0, NULL, NULL);
-        int ndb = actual_db_size;
-        clSetKernelArg(vec_k, 0, sizeof(cl_mem), &db_vectors_mem);
-        clSetKernelArg(vec_k, 1, sizeof(cl_mem), &dev_event_q);
-        clSetKernelArg(vec_k, 2, sizeof(cl_mem), &dev_event_scores);
-        clSetKernelArg(vec_k, 3, sizeof(int), &ndb);
-        size_t gws = ROUND_UP(actual_db_size, lws);
-        clEnqueueNDRangeKernel(cmd_q, vec_k, 1, NULL, &gws, &lws, 0, NULL, NULL);
-        float *sc = malloc(sizeof(float) * actual_db_size);
-        clEnqueueReadBuffer(cmd_q, dev_event_scores, CL_TRUE, 0, sizeof(float) * actual_db_size, sc, 0, NULL, NULL);
-        float ms = 0.0f; int bt = 0;
-        for(int i=0; i<actual_db_size; i++) { if(sc[i] > ms) { ms = sc[i]; bt = i; } }
-        
-        if(ms > 0.92f) {
-            int apt_id = bt / 2000;
-            if (e->type == EVENT_EXEC) {
-                if (apt_id == 8) printf("\033[1;31;5m[ASIC ALERT] CRITICAL: VAULT 7 / MARBLE MATCH! (%.2f)\033[0m\n", ms);
-                else if (apt_id == 9) printf("\033[1;31;5m[ASIC ALERT] CRITICAL: FIRMWARE IMPLANT DETECTED! (%.2f)\033[0m\n", ms);
-                else printf("\033[1;35m[ASIC VECTOR ALERT] APT %d Match! (%.2f)\033[0m\n", apt_id, ms);
-                printf("[IPS] Terminated Process %d\n", e->pid);
-                kill(e->pid, SIGKILL);
-            } else {
-                printf("\033[1;31;5m[ASIC L1 ALERT] MALICIOUS PACKET DROPPED (Score: %.2f)\033[0m\n", ms);
-                printf("[IPS] NETWORK PACKET DROPPED\n");
-            }
-        } else if (ms > 0.60f) {
-            if (!vault_locked) {
-                float lr = 0.05f;
-                // Path C: Offload Hebbian Evolution to Fortran HPC logic
-                float target_vec[VECTOR_DIMS];
-                clEnqueueReadBuffer(cmd_q, db_vectors_mem, CL_TRUE, bt * VECTOR_DIMS * sizeof(float), VECTOR_DIMS * sizeof(float), target_vec, 0, NULL, NULL);
-                
-                qihse_hebbian_update_fortran(target_vec, q, 0, lr, VECTOR_DIMS);
-                
-                clEnqueueWriteBuffer(cmd_q, db_vectors_mem, CL_TRUE, bt * VECTOR_DIMS * sizeof(float), VECTOR_DIMS * sizeof(float), target_vec, 0, NULL, NULL);
-
-                printf("[ASIC EVOLVE] Tensor DB optimized (Vector %d) via HPC Fortran.\n", bt);
-                char msg[] = "EVOLUTION";
-                sendto(swarm_sd, msg, sizeof(msg), 0, (struct sockaddr *)&swarm_addr, sizeof(swarm_addr));
-            } else {
-                printf("[VAULT] Evolution Suppressed (Locked)\n");
-                fflush(stdout);
-            }
-        }
-        free(sc);
-        
-        cl_mem dp = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, MAX_PAYLOAD, e->payload, NULL);
-        
-        int ds_val = MAX_PAYLOAD, bs = BLACKBOX_SIZE;
-        clSetKernelArg(blackbox_k, 0, sizeof(cl_mem), &blackbox_mem);
-        clSetKernelArg(blackbox_k, 1, sizeof(cl_mem), &dp);
-        clSetKernelArg(blackbox_k, 2, sizeof(int), &blackbox_offset);
-        clSetKernelArg(blackbox_k, 3, sizeof(int), &bs);
-        clSetKernelArg(blackbox_k, 4, sizeof(int), &ds_val);
-        size_t bb_gws = ROUND_UP(MAX_PAYLOAD, lws);
-        clEnqueueNDRangeKernel(cmd_q, blackbox_k, 1, NULL, &bb_gws, &lws, 0, NULL, NULL);
-        blackbox_offset = (blackbox_offset + MAX_PAYLOAD) % BLACKBOX_SIZE;
-
-        cl_mem dr = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, sizeof(int)*NUM_MASKS, NULL, NULL);
-        int blk = MAX_PAYLOAD / 8, nmk = NUM_MASKS;
-        clSetKernelArg(super_k, 0, sizeof(cl_mem), &dp);
-        clSetKernelArg(super_k, 1, sizeof(cl_mem), &dev_masks);
-        clSetKernelArg(super_k, 2, sizeof(cl_mem), &dr);
-        clSetKernelArg(super_k, 3, sizeof(int), &blk);
-        clSetKernelArg(super_k, 4, sizeof(int), &nmk);
-        size_t super_gws = ROUND_UP(blk, lws);
-        clEnqueueNDRangeKernel(cmd_q, super_k, 1, NULL, &super_gws, &lws, 0, NULL, NULL);
-        int res[NUM_MASKS]; clEnqueueReadBuffer(cmd_q, dr, CL_TRUE, 0, sizeof(res), res, 0, NULL, NULL);
-        for(int i=0; i<nmk; i++) if(res[i] > 0) printf("\033[1;31m[ASIC ALERT] Signature Match %d!\033[0m\n", i);
-        clReleaseMemObject(dp); clReleaseMemObject(dr);
+    if (finding.severity > EDR_SEV_INFO) {
+        g_telemetry.suspicious_events++;
     }
+
+    bool should_emit = (finding.severity > EDR_SEV_INFO && finding.severity >= rules.min_severity) ||
+                       (opts && opts->all_events);
+    if (opts && !opts->all_events && finding.severity > EDR_SEV_INFO &&
+        finding.severity >= rules.min_severity &&
+        suppress_duplicate(opts, e, &finding)) {
+        should_emit = false;
+    }
+
+    if (!should_emit) {
+        return 0;
+    }
+
+    emit_finding(opts, e, &finding, 0);
     return 0;
 }
 
+static struct bpf_link *attach_tracepoint(struct bpf_object *obj,
+                                          const char *prog_name,
+                                          const char *category,
+                                          const char *name) {
+    struct bpf_program *prog = bpf_object__find_program_by_name(obj, prog_name);
+    if (!prog) {
+        fprintf(stderr, "missing BPF program: %s\n", prog_name);
+        return NULL;
+    }
+
+    struct bpf_link *link = bpf_program__attach_tracepoint(prog, category, name);
+    if (!link) {
+        fprintf(stderr, "failed to attach %s:%s\n", category, name);
+    }
+    return link;
+}
+
 int main(int argc, char **argv) {
-    if (argc < 2) { printf("Usage: %s <ifname1> [--node <id>]\n", argv[0]); return 1; }
-    
-    char *iface = argv[1];
-    for (int i=1; i<argc; i++) {
-        if (strcmp(argv[i], "--node") == 0 && i+1 < argc) {
-            node_id = atoi(argv[i+1]);
+    struct edr_options opts = {
+        .config_path = DEFAULT_CONFIG_PATH,
+        .bpf_path = "asic_sensor.bpf.o",
+        .jsonl = NULL,
+        .console = true,
+        .all_events = false,
+        .check_config = false,
+    };
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            opts.jsonl = fopen(argv[++i], "a");
+            if (!opts.jsonl) {
+                fprintf(stderr, "failed to open JSONL output %s: %s\n", argv[i], strerror(errno));
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "--quiet") == 0) {
+            opts.console = false;
+        } else if (strcmp(argv[i], "--all-events") == 0) {
+            opts.all_events = true;
+        } else if (strcmp(argv[i], "--check-config") == 0) {
+            opts.check_config = true;
+        } else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
+            opts.config_path = argv[++i];
+        } else if (strcmp(argv[i], "--bpf") == 0 && i + 1 < argc) {
+            opts.bpf_path = argv[++i];
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            fprintf(stdout, "usage: %s [-c rules.conf] [-o events.jsonl] [--quiet] [--all-events] [--check-config] [--bpf path]\n", argv[0]);
+            return 0;
+        } else {
+            fprintf(stderr, "usage: %s [-c rules.conf] [-o events.jsonl] [--quiet] [--all-events] [--check-config] [--bpf path]\n", argv[0]);
+            return 1;
         }
+    }
+
+    init_default_rules();
+    if (!load_rules_file(opts.config_path, opts.check_config)) {
+        if (opts.jsonl) {
+            fclose(opts.jsonl);
+        }
+        return 1;
+    }
+
+    if (opts.check_config) {
+        struct policy_summary summary = current_policy_summary();
+        if (opts.console) {
+            write_policy_summary_console(stdout, &summary, "config ok: ");
+        }
+        if (opts.jsonl) {
+            fclose(opts.jsonl);
+        }
+        return 0;
     }
 
     signal(SIGINT, sig_handler);
-    signal(SIGUSR1, sig_handler);
-    signal(SIGUSR2, sig_handler);
-    init_asic();
-    init_pci();
-    pthread_t comp_t, l3_t, mea_t, swarm_t, l4_t, code_t;
-    pthread_create(&comp_t, NULL, perform_compliance_check, NULL);
-    pthread_create(&l3_t, NULL, l3_hardware_thread, NULL);
-    pthread_create(&mea_t, NULL, me_activator_thread, NULL);
-    pthread_create(&swarm_t, NULL, swarm_listener, NULL);
-    pthread_create(&l4_t, NULL, l4_rf_thread, (void*)iface);
-    pthread_create(&code_t, NULL, code_intelligence_thread, NULL);
+    signal(SIGTERM, sig_handler);
 
-    struct bpf_object *obj = bpf_object__open_file("asic_sensor.bpf.o", NULL);
-    if (!obj || bpf_object__load(obj)) { printf("BPF Load Fail\n"); return 1; }
-    bpf_program__attach(bpf_object__find_program_by_name(obj, "trace_execve"));
-    bpf_program__attach(bpf_object__find_program_by_name(obj, "trace_mei_write"));
-    struct bpf_program *xdp_p = bpf_object__find_program_by_name(obj, "xdp_me_monitor");
-    for (int i = 1; i < argc; i++) {
-        int ifidx = if_nametoindex(argv[i]);
-        if (ifidx > 0) bpf_xdp_attach(ifidx, bpf_program__fd(xdp_p), XDP_FLAGS_SKB_MODE, NULL);
+    struct bpf_object *obj = bpf_object__open_file(opts.bpf_path, NULL);
+    if (!obj) {
+        fprintf(stderr, "failed to open %s\n", opts.bpf_path);
+        return 1;
     }
-    struct ring_buffer *rb = ring_buffer__new(bpf_object__find_map_fd_by_name(obj, "rb"), handle_event, NULL, NULL);
-    printf("--- ASI COMMAND CENTER BACKEND ONLINE ---\n");
-    while(!stop) if (rb) ring_buffer__poll(rb, 100);
-    
-    printf("\n[ASIC] Shutting down. Saving Progress...\n");
-    save_progress();
-    save_db();
 
-    printf("[ASIC] Dumping Blackbox...\n");
-    char *bb_buf = malloc(BLACKBOX_SIZE);
-    if (bb_buf) {
-        clEnqueueReadBuffer(cmd_q, blackbox_mem, CL_TRUE, 0, BLACKBOX_SIZE, bb_buf, 0, NULL, NULL);
-        FILE *bb_f = fopen("blackbox.bin", "wb");
-        if (bb_f) {
-            fwrite(bb_buf, 1, blackbox_offset, bb_f);
-            fclose(bb_f);
-            printf("[ASIC] Blackbox dumped to blackbox.bin (%d bytes)\n", blackbox_offset);
+    if (bpf_object__load(obj)) {
+        fprintf(stderr, "failed to load EDR sensor\n");
+        bpf_object__close(obj);
+        return 1;
+    }
+
+    links[0] = attach_tracepoint(obj, "trace_execve", "syscalls", "sys_enter_execve");
+    links[1] = attach_tracepoint(obj, "trace_mprotect", "syscalls", "sys_enter_mprotect");
+    links[2] = attach_tracepoint(obj, "trace_mmap", "syscalls", "sys_enter_mmap");
+    links[3] = attach_tracepoint(obj, "trace_openat", "syscalls", "sys_enter_openat");
+    links[4] = attach_tracepoint(obj, "trace_connect", "syscalls", "sys_enter_connect");
+
+    if (!links[0] || !links[1] || !links[2] || !links[3] || !links[4]) {
+        for (size_t i = 0; i < sizeof(links) / sizeof(links[0]); i++) {
+            if (links[i]) {
+                bpf_link__destroy(links[i]);
+            }
         }
-        free(bb_buf);
+        bpf_object__close(obj);
+        return 1;
     }
 
-    ring_buffer__free(rb); bpf_object__close(obj);
+    int rb_fd = bpf_object__find_map_fd_by_name(obj, "rb");
+    if (rb_fd < 0) {
+        fprintf(stderr, "failed to find ring buffer map\n");
+        for (size_t i = 0; i < sizeof(links) / sizeof(links[0]); i++) {
+            bpf_link__destroy(links[i]);
+        }
+        bpf_object__close(obj);
+        return 1;
+    }
+
+    struct ring_buffer *rb = ring_buffer__new(rb_fd, handle_event, &opts, NULL);
+    if (!rb) {
+        fprintf(stderr, "failed to create ring buffer\n");
+        for (size_t i = 0; i < sizeof(links) / sizeof(links[0]); i++) {
+            bpf_link__destroy(links[i]);
+        }
+        bpf_object__close(obj);
+        return 1;
+    }
+
+    if (opts.console) {
+        printf("--- ASIC-SOC EDR %s online ---\n", ASIC_EDR_VERSION);
+        struct policy_summary summary = current_policy_summary();
+        write_policy_summary_console(stdout, &summary, "policy: ");
+    }
+    if (opts.jsonl) {
+        struct policy_summary summary = current_policy_summary();
+        write_policy_summary_jsonl(opts.jsonl, &summary);
+    }
+    while (!stop) {
+        update_telemetry_stats();
+        ring_buffer__poll(rb, 250);
+    }
+
+    flush_dedup_cache(&opts);
+    ring_buffer__free(rb);
+    for (size_t i = 0; i < sizeof(links) / sizeof(links[0]); i++) {
+        if (links[i]) {
+            bpf_link__destroy(links[i]);
+        }
+    }
+    bpf_object__close(obj);
+    if (opts.jsonl) {
+        fclose(opts.jsonl);
+    }
     return 0;
 }

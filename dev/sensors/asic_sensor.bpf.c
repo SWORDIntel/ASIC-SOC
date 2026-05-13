@@ -1,88 +1,164 @@
-
-#define __TARGET_ARCH_x86
-#include "vmlinux.h"
+#include <linux/types.h>
+#include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
-#include <bpf/bpf_tracing.h>
-#include <bpf/bpf_core_read.h>
+
 #include "asic_common.h"
+
+#define EDR_AF_INET 2
+#define EDR_AF_INET6 10
+
+struct trace_event_raw_sys_enter {
+    unsigned long long unused;
+    unsigned long long id;
+    unsigned long long args[6];
+};
+
+struct edr_sockaddr_in {
+    unsigned short family;
+    unsigned short port;
+    unsigned int addr;
+    unsigned char pad[8];
+};
+
+struct edr_sockaddr_in6 {
+    unsigned short family;
+    unsigned short port;
+    unsigned int flowinfo;
+    unsigned char addr[16];
+    unsigned int scope_id;
+};
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 256 * 1024);
 } rb SEC(".maps");
 
-// 1. EDR/Stack Sensor
+static __always_inline void fill_task_identity(struct edr_event *e) {
+    unsigned long long pid_tgid = bpf_get_current_pid_tgid();
+    unsigned long long uid_gid = bpf_get_current_uid_gid();
+
+    e->pid = pid_tgid >> 32;
+    e->tid = (unsigned int)pid_tgid;
+    e->uid = (unsigned int)uid_gid;
+    e->gid = uid_gid >> 32;
+    e->timestamp_ns = bpf_ktime_get_ns();
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+}
+
 SEC("tp/syscalls/sys_enter_execve")
 int trace_execve(struct trace_event_raw_sys_enter *ctx) {
-    struct asic_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e) return 0;
-    e->type = EVENT_EXEC;
-    e->pid = bpf_get_current_pid_tgid() >> 32;
-    e->uid = (int)bpf_get_current_uid_gid();
-    
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    e->ppid = BPF_CORE_READ(task, real_parent, tgid);
-    
-    // Capture Parent UID for Lineage Validation
-    struct cred *p_cred = BPF_CORE_READ(task, real_parent, cred);
-    e->puid = BPF_CORE_READ(p_cred, uid.val);
-    
-    e->loginuid = BPF_CORE_READ(task, loginuid.val);
-    e->sessionid = BPF_CORE_READ(task, sessionid);
-    
-    // Check for a controlling terminal (TTY)
-    struct signal_struct *signal = BPF_CORE_READ(task, signal);
-    struct tty_struct *tty = BPF_CORE_READ(signal, tty);
-    e->has_tty = tty ? 1 : 0;
-    
-    // Get process names
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    bpf_probe_read_kernel_str(&e->pcomm, sizeof(e->pcomm), BPF_CORE_READ(task, real_parent, comm));
-    
-    const char *filename_ptr = (const char *)ctx->args[0];
-    bpf_probe_read_user_str(&e->payload, MAX_PAYLOAD, filename_ptr);
-    
-    bpf_ringbuf_submit(e, 0);
-    return 0;
-}
-
-// 2. ME/HECI Sensor (Kprobe)
-// Hooks the Intel MEI driver write function
-SEC("kprobe/mei_write")
-int BPF_KPROBE(trace_mei_write, struct file *file, const char *ubuf, size_t count) {
-    struct asic_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e) return 0;
-    e->type = EVENT_ME;
-    e->pid = bpf_get_current_pid_tgid() >> 32;
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    e->arg1 = (int)count;
-    bpf_probe_read_user(&e->payload, (count < MAX_PAYLOAD) ? count : MAX_PAYLOAD, ubuf);
-    bpf_ringbuf_submit(e, 0);
-    return 0;
-}
-
-// 3. Edge/Sideband Sensor (XDP)
-SEC("xdp")
-int xdp_me_monitor(struct xdp_md *ctx) {
-    void *data_end = (void *)(long)ctx->data_end;
-    void *data = (void *)(long)ctx->data;
-    
-    // Safety check for reading first 64 bytes
-    if (data + 64 > data_end) return XDP_PASS;
-
-    struct asic_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    if (!e) return XDP_PASS;
-    e->type = EVENT_NET;
-    
-    // Copy 64 bytes of packet data into the payload
-    #pragma clang loop unroll(full)
-    for (int i = 0; i < 64; i++) {
-        e->payload[i] = ((char *)data)[i];
+    struct edr_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
     }
-    
+
+    __builtin_memset(e, 0, sizeof(*e));
+    fill_task_identity(e);
+    e->type = EDR_EVENT_EXEC;
+    e->ppid = 0;
+
+    const char *filename = (const char *)ctx->args[0];
+    bpf_probe_read_user_str(&e->target, sizeof(e->target), filename);
+
     bpf_ringbuf_submit(e, 0);
-    
-    return XDP_PASS;
+    return 0;
+}
+
+SEC("tp/syscalls/sys_enter_mprotect")
+int trace_mprotect(struct trace_event_raw_sys_enter *ctx) {
+    struct edr_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    __builtin_memset(e, 0, sizeof(*e));
+    fill_task_identity(e);
+    e->type = EDR_EVENT_MPROTECT;
+    e->prot = (__u32)ctx->args[2];
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_enter_mmap")
+int trace_mmap(struct trace_event_raw_sys_enter *ctx) {
+    struct edr_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    __builtin_memset(e, 0, sizeof(*e));
+    fill_task_identity(e);
+    e->type = EDR_EVENT_MMAP;
+    e->prot = (__u32)ctx->args[2];
+    e->flags = (__u32)ctx->args[3];
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_enter_openat")
+int trace_openat(struct trace_event_raw_sys_enter *ctx) {
+    struct edr_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    __builtin_memset(e, 0, sizeof(*e));
+    fill_task_identity(e);
+    e->type = EDR_EVENT_OPENAT;
+    e->flags = (__u32)ctx->args[2];
+
+    const char *filename = (const char *)ctx->args[1];
+    bpf_probe_read_user_str(&e->target, sizeof(e->target), filename);
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tp/syscalls/sys_enter_connect")
+int trace_connect(struct trace_event_raw_sys_enter *ctx) {
+    const void *uaddr = (const void *)ctx->args[1];
+    unsigned short family = 0;
+
+    if (!uaddr) {
+        return 0;
+    }
+
+    if (bpf_probe_read_user(&family, sizeof(family), uaddr) != 0) {
+        return 0;
+    }
+
+    if (family != EDR_AF_INET && family != EDR_AF_INET6) {
+        return 0;
+    }
+
+    struct edr_event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+    if (!e) {
+        return 0;
+    }
+
+    __builtin_memset(e, 0, sizeof(*e));
+    fill_task_identity(e);
+    e->type = EDR_EVENT_CONNECT;
+    e->net_family = family;
+
+    if (family == EDR_AF_INET) {
+        struct edr_sockaddr_in sin = {};
+        if (bpf_probe_read_user(&sin, sizeof(sin), uaddr) == 0) {
+            e->net_port = sin.port;
+            e->net_addr_v4 = sin.addr;
+        }
+    } else {
+        struct edr_sockaddr_in6 sin6 = {};
+        if (bpf_probe_read_user(&sin6, sizeof(sin6), uaddr) == 0) {
+            e->net_port = sin6.port;
+            __builtin_memcpy(e->net_addr_v6, sin6.addr, sizeof(e->net_addr_v6));
+        }
+    }
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
 }
 
 char LICENSE[] SEC("license") = "GPL";
