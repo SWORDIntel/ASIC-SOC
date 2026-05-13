@@ -46,6 +46,24 @@ cd dev
 make test-policy
 ```
 
+Run non-root operations validation for the packaged systemd and logrotate
+configuration:
+
+```bash
+cd dev
+make validate-systemd
+make validate-logrotate
+make test-ops
+make verify-install-local
+```
+
+`make validate-systemd` uses `systemd-analyze verify` against the packaged unit.
+From an uninstalled checkout, a missing `/usr/local/bin/asic-edr` executable is
+reported as a warning if it is the only verification complaint. `make
+validate-logrotate` uses `logrotate -d` with a temporary state file so host
+logrotate state is not mutated. `make verify-install-local` runs a dry-run check
+for the expected installed paths.
+
 Validate a policy file without loading eBPF:
 
 ```bash
