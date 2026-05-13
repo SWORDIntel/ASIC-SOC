@@ -101,6 +101,16 @@ Network `connect` findings include `dst_addr`, `dst_port`, and destination class
 - `dst_is_private`: boolean marker for private destinations
 - `dst_is_loopback`: boolean marker for loopback destinations
 
+JSONL startup and finding records include replay/forwarding metadata:
+
+- `schema_version`: JSONL event contract version
+- `agent_id`: endpoint identity, preferring `/etc/machine-id` when available
+- `hostname`: local hostname captured at daemon startup
+- `boot_id`: Linux boot id from `/proc/sys/kernel/random/boot_id` when available
+- `agent_version`: daemon version
+- `config_profile`: active built-in policy profile
+- `config_hash`: deterministic hash of the active config file, or built-in defaults when no file is present
+
 Findings also carry process lineage and session fields used by behavioral-flow detections:
 
 - `gppid`: grandparent process id when it can be resolved, otherwise `0`

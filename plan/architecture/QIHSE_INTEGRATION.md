@@ -51,7 +51,7 @@ QIHSE ingestion should treat JSONL as the stable source of truth. The daemon alr
 - network destination classification
 - behavioral flow fields when present
 
-Add schema metadata before ingestion work:
+Schema metadata is now emitted before ingestion work:
 
 - `schema_version`
 - `agent_id`
@@ -130,7 +130,7 @@ Later analytics:
 
 ## Implementation Slices
 
-1. Schema metadata
+1. Schema metadata - complete
    - add `schema_version`, `agent_id`, `hostname`, `boot_id`, `agent_version`, `config_hash`
    - keep fields stable and test JSONL type contracts
 
@@ -159,4 +159,4 @@ Later analytics:
 
 Local EDR correctness now includes `flow.sensitive_read_then_public_net`.
 
-The next QIHSE-enabling slice should add schema metadata so ingestion has stable host identity and replay semantics.
+The next QIHSE-enabling slice should add local JSONL replay validation so ingestion has stable type checks before forwarder work begins.

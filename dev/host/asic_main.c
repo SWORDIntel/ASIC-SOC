@@ -21,9 +21,12 @@
 #define MAX_RULES 128
 #define MAX_CMDLINE 512
 #define MAX_RULE_ID 64
+#define MAX_HOSTNAME 256
+#define MAX_IDENTITY 128
 #define DEFAULT_DEDUP_WINDOW_SECONDS 5ULL
 #define FLOW_STATE_ENTRIES 256
 #define FLOW_WINDOW_SECONDS 120U
+#define JSONL_SCHEMA_VERSION "1"
 
 static volatile sig_atomic_t stop = 0;
 static struct bpf_link *links[5];
@@ -109,6 +112,15 @@ struct policy_summary {
     uint64_t dedup_window_seconds;
 };
 
+struct agent_metadata {
+    char schema_version[16];
+    char agent_version[32];
+    char hostname[MAX_HOSTNAME];
+    char boot_id[MAX_IDENTITY];
+    char agent_id[MAX_IDENTITY];
+    char config_hash[32];
+};
+
 struct process_context {
     uint32_t ppid;
     uint32_t gppid;
@@ -174,6 +186,7 @@ static size_t dedup_cursor = 0;
 static struct flow_state_entry flow_state[FLOW_STATE_ENTRIES];
 static size_t flow_state_cursor = 0;
 static struct edr_rules rules;
+static struct agent_metadata agent_metadata;
 
 static void sig_handler(int sig) {
     (void)sig;
@@ -369,6 +382,108 @@ static struct policy_summary current_policy_summary(void) {
     };
 }
 
+static void trim_newline(char *value) {
+    size_t len = strlen(value);
+    while (len > 0 && (value[len - 1] == '\n' || value[len - 1] == '\r')) {
+        value[--len] = '\0';
+    }
+}
+
+static bool read_first_line_file(const char *path, char *out, size_t out_size) {
+    if (!path || !out || out_size == 0) {
+        return false;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return false;
+    }
+
+    bool ok = fgets(out, out_size, f) != NULL;
+    fclose(f);
+    if (!ok) {
+        out[0] = '\0';
+        return false;
+    }
+    trim_newline(out);
+    return out[0] != '\0';
+}
+
+static void compute_config_hash(const char *path, char *out, size_t out_size) {
+    const uint64_t fnv_offset = 1469598103934665603ULL;
+    const uint64_t fnv_prime = 1099511628211ULL;
+    uint64_t hash = fnv_offset;
+    FILE *f = path ? fopen(path, "rb") : NULL;
+
+    if (f) {
+        unsigned char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+            for (size_t i = 0; i < n; i++) {
+                hash ^= buf[i];
+                hash *= fnv_prime;
+            }
+        }
+        fclose(f);
+    } else {
+        const char *fallback = "builtin-defaults";
+        for (const unsigned char *p = (const unsigned char *)fallback; *p; p++) {
+            hash ^= *p;
+            hash *= fnv_prime;
+        }
+    }
+
+    snprintf(out, out_size, "fnv1a64:%016llx", (unsigned long long)hash);
+}
+
+static void init_agent_metadata(const char *config_path) {
+    memset(&agent_metadata, 0, sizeof(agent_metadata));
+    snprintf(agent_metadata.schema_version, sizeof(agent_metadata.schema_version), "%s",
+             JSONL_SCHEMA_VERSION);
+    snprintf(agent_metadata.agent_version, sizeof(agent_metadata.agent_version), "%s",
+             ASIC_EDR_VERSION);
+
+    if (gethostname(agent_metadata.hostname, sizeof(agent_metadata.hostname)) != 0) {
+        snprintf(agent_metadata.hostname, sizeof(agent_metadata.hostname), "unknown");
+    }
+    agent_metadata.hostname[sizeof(agent_metadata.hostname) - 1] = '\0';
+
+    if (!read_first_line_file("/proc/sys/kernel/random/boot_id",
+                              agent_metadata.boot_id,
+                              sizeof(agent_metadata.boot_id))) {
+        snprintf(agent_metadata.boot_id, sizeof(agent_metadata.boot_id), "unknown");
+    }
+
+    if (!read_first_line_file("/etc/machine-id",
+                              agent_metadata.agent_id,
+                              sizeof(agent_metadata.agent_id))) {
+        snprintf(agent_metadata.agent_id, sizeof(agent_metadata.agent_id), "%.*s",
+                 (int)sizeof(agent_metadata.agent_id) - 1,
+                 agent_metadata.hostname);
+    }
+
+    compute_config_hash(config_path, agent_metadata.config_hash,
+                        sizeof(agent_metadata.config_hash));
+}
+
+static void write_jsonl_metadata(FILE *out, const char *profile_name) {
+    fprintf(out, "\"schema_version\":\"");
+    json_escape(out, agent_metadata.schema_version);
+    fprintf(out, "\",\"agent_id\":\"");
+    json_escape(out, agent_metadata.agent_id);
+    fprintf(out, "\",\"hostname\":\"");
+    json_escape(out, agent_metadata.hostname);
+    fprintf(out, "\",\"boot_id\":\"");
+    json_escape(out, agent_metadata.boot_id);
+    fprintf(out, "\",\"agent_version\":\"");
+    json_escape(out, agent_metadata.agent_version);
+    fprintf(out, "\",\"config_profile\":\"");
+    json_escape(out, profile_name ? profile_name : "baseline");
+    fprintf(out, "\",\"config_hash\":\"");
+    json_escape(out, agent_metadata.config_hash);
+    fprintf(out, "\"");
+}
+
 static void write_policy_summary_console(FILE *out, const struct policy_summary *summary,
                                          const char *prefix) {
     if (!out || !summary) {
@@ -394,9 +509,9 @@ static void write_policy_summary_jsonl(FILE *out, const struct policy_summary *s
         return;
     }
 
-    fprintf(out,
-            "{\"record\":\"policy_summary\",\"version\":\"%s\",\"profile\":\"",
-            ASIC_EDR_VERSION);
+    fprintf(out, "{\"record\":\"policy_summary\",");
+    write_jsonl_metadata(out, summary->profile_name);
+    fprintf(out, ",\"version\":\"%s\",\"profile\":\"", ASIC_EDR_VERSION);
     json_escape(out, summary->profile_name ? summary->profile_name : "baseline");
     fprintf(out,
             "\",\"exec_exact\":%zu,\"exec_prefix\":%zu,"
@@ -1779,8 +1894,10 @@ static void write_jsonl(FILE *out, const struct edr_event *e,
         return;
     }
 
+    fprintf(out, "{\"record\":\"finding\",");
+    write_jsonl_metadata(out, rules.profile_name);
     fprintf(out,
-            "{\"timestamp_ns\":%llu,\"event\":\"%s\",\"pid\":%u,\"tid\":%u,"
+            ",\"timestamp_ns\":%llu,\"event\":\"%s\",\"pid\":%u,\"tid\":%u,"
             "\"ppid\":%u,\"gppid\":%u,\"uid\":%u,\"gid\":%u,\"comm\":\"",
             (unsigned long long)e->timestamp_ns, event_name(e->type), e->pid, e->tid,
             proc->ppid, proc->gppid, e->uid, e->gid);
@@ -2086,6 +2203,7 @@ int main(int argc, char **argv) {
         }
         return 1;
     }
+    init_agent_metadata(opts.config_path);
 
     if (opts.check_config) {
         struct policy_summary summary = current_policy_summary();

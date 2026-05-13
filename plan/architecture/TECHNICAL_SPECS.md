@@ -23,6 +23,7 @@
 - network events: destination address, destination port, address family, destination scope, private-address marker, and loopback classification
 - network destination classification: JSONL `connect` findings expose `dst_scope`, `dst_is_private`, and `dst_is_loopback`; loopback destinations are local-only, private destinations cover RFC1918 IPv4 and unique-local IPv6 ranges, public destinations are externally routable, and unknown/unclassified values use an empty scope string
 - alerts: timestamp, source, message, severity, stable `rule_id`
+- JSONL schema metadata: startup and finding records include `schema_version`, `agent_id`, `hostname`, `boot_id`, `agent_version`, `config_profile`, and `config_hash`
 - behavioral flow findings: normal finding fields plus `flow_id`, `flow_score`, `flow_reasons`, `flow_window_seconds`, and `flow_root_pid`; flow findings are produced from bounded process-tree state that correlates recent exec, file, lineage/session, and network signals
 - QIHSE integration boundary: local JSONL remains the stable event contract; QIHSE is planned as an optional forwarder/importer target for historical analytics, replay, and cross-host correlation, not as inline detection storage
 - policy profile: `profile=<baseline|server|developer-workstation|high-signal>` selects built-in/default rule posture
@@ -42,6 +43,6 @@ Compiled behavioral flow detections use their flow ids as stable rule ids, inclu
 ## Near-Term Work
 
 1. Add profile-specific behavioral flow thresholds and default enablement.
-2. Add JSONL schema and host identity metadata as the first QIHSE-enabling foundation.
-3. Add JSONL replay validation tooling for local spool files.
+2. Add JSONL replay validation tooling for local spool files.
+3. Add QIHSE forwarder dry-run batching design.
 4. Add Debian packaging metadata.

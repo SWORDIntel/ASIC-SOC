@@ -33,6 +33,7 @@ Turn the repository into a focused endpoint detection and response agent instead
 25. Add bounded process-tree flow state for short-lived behavioral correlation, including JSONL `flow_id`, `flow_score`, `flow_reasons`, `flow_window_seconds`, and `flow_root_pid`.
 26. Add ID-based disable and severity controls for compiled behavioral flow detections.
 27. Add `flow.sensitive_read_then_public_net` to correlate sensitive file access followed by public-network transfer behavior.
+28. Add JSONL schema and host identity metadata for replay and QIHSE-ready forwarding.
 
 ## Phase 1: Detection Quality
 
@@ -162,13 +163,13 @@ Objective: prevent regressions while the sensor grows.
 
 ## Next Implementation Slice
 
-1. Add JSONL schema and host identity metadata.
-2. Include `schema_version`, `agent_id`, `hostname`, `boot_id`, `agent_version`, and `config_hash`.
-3. Add JSONL type-contract tests for startup and finding records.
-4. Keep the fields local-first so QIHSE remains optional and outside the daemon hot path.
+1. Add JSONL replay validation tooling for local spool files.
+2. Validate required metadata, finding, policy summary, network, provenance, lineage, and flow fields.
+3. Support dry-run normalized output for future QIHSE ingestion.
+4. Keep replay tooling separate from the daemon hot path.
 
 ## Later Integration Slice
 
-1. Add JSONL schema and host identity metadata.
-2. Add a local replay tool that can later feed QIHSE.
+1. Add a local replay tool that can later feed QIHSE.
+2. Add QIHSE forwarder dry-run batching and checkpoint planning.
 3. Keep QIHSE optional and outside the daemon hot path.

@@ -156,6 +156,76 @@ sys.exit(1)
 PY
 }
 
+assert_jsonl_schema_metadata() {
+    local file="$1"
+
+    python3 - "$file" <<'PY'
+import json
+import re
+import sys
+
+path = sys.argv[1]
+required = (
+    "schema_version",
+    "agent_id",
+    "hostname",
+    "boot_id",
+    "agent_version",
+    "config_profile",
+    "config_hash",
+)
+records = []
+
+with open(path, "r", encoding="utf-8") as lines:
+    for line_no, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(f"invalid JSONL on line {line_no}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if record.get("record") in {"policy_summary", "finding"}:
+            records.append((line_no, record))
+
+if not records:
+    print("no policy_summary or finding JSONL records found", file=sys.stderr)
+    sys.exit(1)
+
+seen = {record.get("record") for _, record in records}
+if "policy_summary" not in seen or "finding" not in seen:
+    print("JSONL metadata test needs both policy_summary and finding records", file=sys.stderr)
+    sys.exit(1)
+
+for line_no, record in records:
+    missing = [field for field in required if field not in record]
+    if missing:
+        print(
+            f"JSONL record on line {line_no} missing metadata fields: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    for field in required:
+        if not isinstance(record[field], str) or not record[field]:
+            print(
+                f"JSONL record on line {line_no} has invalid string metadata field {field}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    if record["schema_version"] != "1":
+        print(f"JSONL record on line {line_no} has unexpected schema_version", file=sys.stderr)
+        sys.exit(1)
+    if record["agent_version"] != "0.2.0":
+        print(f"JSONL record on line {line_no} has unexpected agent_version", file=sys.stderr)
+        sys.exit(1)
+    if not re.fullmatch(r"fnv1a64:[0-9a-f]{16}", record["config_hash"]):
+        print(f"JSONL record on line {line_no} has invalid config_hash", file=sys.stderr)
+        sys.exit(1)
+PY
+}
+
 assert_finding_exe_provenance_fields() {
     local file="$1"
 
@@ -650,6 +720,18 @@ test_runtime_jsonl_emits_policy_profile() {
     assert_present '"profile":"developer-workstation"' "$output_file" "policy_summary JSONL missing selected profile"
 }
 
+test_runtime_jsonl_emits_schema_metadata() {
+    local config_file output_file
+    config_file="$(base_config)"
+    output_file="$(new_output_path /tmp/asic-edr-policy-schema.XXXXXX.jsonl)"
+    printf '\nprofile=server\n' >> "$config_file"
+
+    run_agent_capture "$config_file" "$output_file"
+
+    assert_jsonl_schema_metadata "$output_file"
+    assert_present '"config_profile":"server"' "$output_file" "JSONL metadata missing selected config profile"
+}
+
 test_high_signal_profile_suppresses_shell_exec_defaults() {
     local baseline_config baseline_summary high_signal_config high_signal_summary
     local baseline_exec_exact high_signal_exec_exact
@@ -825,6 +907,7 @@ test_check_config_emits_policy_summary
 test_check_config_summary_emits_profile
 test_runtime_jsonl_emits_policy_summary
 test_runtime_jsonl_emits_policy_profile
+test_runtime_jsonl_emits_schema_metadata
 test_high_signal_profile_suppresses_shell_exec_defaults
 test_runtime_jsonl_emits_exe_provenance_fields
 test_runtime_jsonl_emits_lineage_session_fields
