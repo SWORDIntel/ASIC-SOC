@@ -7,8 +7,9 @@
 - Rules: line-based config loaded from `/etc/asic-edr/rules.conf` by default.
 - Validation: `--check-config` validates policy files without loading eBPF.
 - JSONL export: optional finding stream for local spool, journald/SIEM collection, replay tooling, and future QIHSE forwarding.
+- Replay validator: local/offline JSONL validator and normalizer for one or more spool files.
 - Raw telemetry: `--all-events` for short diagnostic captures.
-- Tests: `make test-smoke`, `make test-policy`, and `make test-ops`.
+- Tests: `make test-smoke`, `make test-policy`, `make test-replay`, and `make test-ops`.
 - Ops scaffolding: hardened systemd service and logrotate configuration.
 
 ## JSONL Record Types
@@ -90,9 +91,11 @@ Local JSONL is the stable event contract.
 
 QIHSE is planned as an optional forwarder/importer target for historical analytics, replay, and cross-host correlation. It must not be required for local detection, local alert emission, response policy decisions, or service startup.
 
+The replay validator runs outside the daemon hot path. It can validate one or more JSONL files, fail strictly on schema drift or unknown records when requested, and emit normalized dry-run JSONL for downstream importer or forwarder checks.
+
 ## Near-Term Work
 
-1. Add JSONL replay validation tooling for local spool files.
-2. Add profile-specific behavioral flow thresholds and default enablement.
-3. Add QIHSE forwarder dry-run batching design.
-4. Add Debian packaging metadata.
+1. Add profile-specific behavioral flow thresholds and default enablement.
+2. Add QIHSE forwarder dry-run batching design.
+3. Add Debian packaging metadata.
+4. Add offset checkpoint and retry/backpressure specs for optional forwarding.

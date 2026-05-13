@@ -23,6 +23,9 @@ test-smoke: all
 test-policy: all
 	cd .. && ./tests/policy_test.sh
 
+test-replay:
+	cd .. && ./tests/replay_validator_test.sh
+
 validate-systemd:
 	@command -v systemd-analyze >/dev/null 2>&1 || { echo "SKIP: systemd-analyze not found"; exit 0; }
 	@tmp="$$(mktemp)"; \
@@ -53,4 +56,4 @@ verify-install-local:
 test-ops:
 	@cd .. && ./tests/ops_validation_test.sh
 
-test: test-smoke test-policy test-ops
+test: test-smoke test-policy test-replay test-ops

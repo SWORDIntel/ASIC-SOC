@@ -52,6 +52,13 @@ cd dev
 make test-policy
 ```
 
+Run replay validator regression tests:
+
+```bash
+cd dev
+make test-replay
+```
+
 Run non-root operations validation for the packaged systemd and logrotate
 configuration:
 
@@ -127,6 +134,29 @@ Behavioral flow findings correlate short-lived process-tree activity and add:
 - `flow_root_pid`: process-tree root pid used as the flow correlation key
 
 Initial compiled flow detections cover shell-spawned downloader or transfer-tool activity that reaches a public network destination, no-TTY public transfer-tool activity, and sensitive file access followed by public-network transfer behavior.
+
+## Replay Validator
+
+Use the local replay validator to check one or more daemon JSONL spool files before importing them into downstream tooling:
+
+```bash
+./tools/asic_jsonl_replay.py /var/log/asic-edr/events.jsonl
+./tools/asic_jsonl_replay.py /var/log/asic-edr/events.jsonl /tmp/capture.jsonl
+```
+
+Strict mode treats unknown record types or schema drift as validation failures:
+
+```bash
+./tools/asic_jsonl_replay.py --strict /var/log/asic-edr/events.jsonl
+```
+
+Normalize mode emits normalized JSONL suitable for dry-run import and future forwarder/QIHSE ingestion checks:
+
+```bash
+./tools/asic_jsonl_replay.py --normalize /var/log/asic-edr/events.jsonl > normalized.jsonl
+```
+
+The validator is an offline/local tool. QIHSE remains optional and outside the daemon hot path; local detection, alert emission, service startup, and response policy decisions do not depend on QIHSE or replay validation.
 
 ## Install
 

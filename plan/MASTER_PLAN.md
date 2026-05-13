@@ -16,7 +16,7 @@ The daemon should detect high-signal endpoint behavior locally, emit durable JSO
 6. Deduplication with configurable suppression window and repeat-count summaries.
 7. Compiled behavioral flows for shell-downloader public networking, no-TTY public transfer tools, and sensitive-read then public-network transfer behavior.
 8. Startup policy summary JSONL records and per-record schema/host metadata for replay and future forwarding.
-9. Smoke, policy, and ops validation targets for build/runtime regression checks.
+9. Smoke, policy, replay, and ops validation targets for build/runtime regression checks.
 10. Systemd service and logrotate packaging scaffolds.
 
 ## Roadmap Priorities
@@ -66,20 +66,21 @@ Completed:
 - Finding records with stable IDs and flow fields.
 - Schema and host metadata on startup and finding records.
 - Local spool path and logrotate scaffold.
+- Local JSONL replay validator for spool validation and normalized dry-run output.
 
 Next implementation slice:
 
-1. Add a local JSONL replay validator.
-2. Validate `policy_summary` and `finding` records against required field/type contracts.
-3. Validate optional context groups for network, provenance, lineage, and flow fields.
-4. Support normalized dry-run output for future QIHSE ingestion.
-5. Keep replay tooling separate from the daemon hot path.
+1. Add QIHSE forwarder dry-run batching.
+2. Add offset checkpoints and retry/backpressure design.
+3. Add quarantine handling for rejected or schema-incompatible batches.
+4. Add saved analytics query sketches for flow detections, process-tree investigation, and cross-host command similarity.
+5. Keep forwarding optional and separate from the daemon hot path.
 
 Later:
 
-1. Add QIHSE forwarder dry-run batching.
-2. Add offset checkpoints and retry/backpressure design.
-3. Add saved analytics queries for flow detections, process-tree investigation, and cross-host command similarity.
+1. Add profile-aware replay/analytics tuning views.
+2. Add QIHSE submission integration after dry-run batching and checkpoints are proven.
+3. Add saved analytics packs for noisy-rule review by profile or host group.
 
 ## Phase 3: Controlled Response
 
@@ -108,7 +109,7 @@ Objective: prevent regressions as policy and behavior logic expand.
 
 1. Add parser/unit tests for severity parsing, duplicate override order, disables, invalid values, and profile interactions.
 2. Add runtime tests for sensitive writes, suspicious exec rules, JIT allowlist behavior, dedup edge cases, and representative flow detections.
-3. Add replay validator tests using known-good and known-bad JSONL fixtures.
+3. Keep replay validator tests covering known-good, known-bad, strict-mode, and normalization fixtures.
 4. Add service/package tests for systemd units, logrotate, install paths, and release packaging.
 
 ## Non-Goals

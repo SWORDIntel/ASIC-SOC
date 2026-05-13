@@ -68,9 +68,9 @@ Implemented finding context:
 - network destination classification
 - behavioral flow fields when present
 
-## Next Slice: Replay Validator
+## Current Slice: Replay Validator
 
-Add a standalone local tool before direct QIHSE writes.
+Use the standalone local replay validator before direct QIHSE writes.
 
 Responsibilities:
 
@@ -81,6 +81,7 @@ Responsibilities:
 - validate required fields for `finding`
 - validate optional context groups for network, provenance, lineage, and flow fields
 - report bad line numbers and reasons
+- fail on unknown record types or schema drift in strict mode
 - support normalized dry-run output for future ingestion
 
 Failure behavior:
@@ -88,11 +89,11 @@ Failure behavior:
 - invalid JSON: fail with line number
 - unsupported schema: fail with schema value
 - missing required field: fail with record type and field name
-- unknown record type: warn by default, fail in strict mode later
+- unknown record type: warn by default, fail in strict mode
 
 ## Forwarder Model
 
-Implement QIHSE forwarding as a separate process or optional mode after replay validation exists.
+Implement QIHSE forwarding as a separate process or optional mode after replay validation.
 
 Responsibilities:
 
@@ -131,8 +132,8 @@ Later analytics:
 ## Implementation Slices
 
 1. Schema metadata - complete
-2. Local replay validator - next
-3. Forwarder dry-run batching
+2. Local replay validator - current implemented slice
+3. Forwarder dry-run batching - next
 4. Offset checkpoints and retry/backpressure
 5. QIHSE submission integration
 6. Saved analytics packs
