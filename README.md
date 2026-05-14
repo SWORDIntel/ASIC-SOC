@@ -3,6 +3,26 @@
 This repository has been stripped down to a headless endpoint detection and response prototype.
 The active roadmap lives in `plan/MASTER_PLAN.md`.
 
+## Current status
+
+The current build is a local-first EDR sensor and JSONL event producer. It can
+load eBPF syscall telemetry, enrich events from `/proc`, evaluate configurable
+local policy, emit durable findings, validate/replay JSONL, and dry-run QIHSE
+forwarding without putting remote storage in the detection path.
+
+Recent roadmap work added:
+
+- Behavioral flow detections for suspicious process-tree activity instead of only single-process matches
+- User/session context fields such as TTY and interactive-session markers
+- Profile-aware flow scoring and allowlist controls for benign transfer tooling
+- JSONL schema metadata for replay, import, and future cross-host analytics
+- A strict replay validator and QIHSE dry-run forwarder with batching, checkpoint/resume, and quarantine reports
+- Debian packaging skeleton plus systemd, logrotate, install-path, and package metadata validation
+
+Near-term work is focused on user-idle/user-presence enrichment, better flow
+logic for suspicious tool chains, dry-run response candidate records, forwarder
+health records, and reproducible release artifacts.
+
 ## What remains
 
 - eBPF syscall telemetry for `execve`, `mprotect`, `mmap`, `openat`, and `connect`
@@ -60,13 +80,14 @@ make test-replay
 make test-qihse-forwarder
 ```
 
-Run non-root operations validation for the packaged systemd and logrotate
-configuration:
+Run non-root operations validation for the packaged systemd, logrotate, install
+paths, and Debian package skeleton:
 
 ```bash
 cd dev
 make validate-systemd
 make validate-logrotate
+make validate-debian-packaging
 make test-ops
 make verify-install-local
 ```
@@ -75,8 +96,16 @@ make verify-install-local
 From an uninstalled checkout, a missing `/usr/local/bin/asic-edr` executable is
 reported as a warning if it is the only verification complaint. `make
 validate-logrotate` uses `logrotate -d` with a temporary state file so host
-logrotate state is not mutated. `make verify-install-local` runs a dry-run check
-for the expected installed paths.
+logrotate state is not mutated. `make validate-debian-packaging` checks the
+Debian metadata skeleton without building a package. `make verify-install-local`
+runs a dry-run check for the expected installed paths.
+
+Run the aggregate regression suite:
+
+```bash
+cd dev
+make test
+```
 
 Validate a policy file without loading eBPF:
 
@@ -172,6 +201,12 @@ Use the optional dry-run forwarder to validate batching and checkpoint behavior 
 
 Live submission is intentionally not implemented yet. The forwarder currently validates records, emits compact `qihse_batch_dry_run` JSONL payloads, updates checkpoints only after successful validation, and can write compact quarantine reports for rejected inputs.
 
+Saved query sketches for future QIHSE/imported JSONL analytics live in
+`plan/analytics/QIHSE_QUERIES.md`. They cover cross-host `flow_id` review,
+`flow_root_pid` process-tree investigation, no-TTY public transfer activity,
+sensitive-read followed by public-network transfer, command-line clustering,
+noisy-rule review, and forwarder/quarantine health.
+
 ## Install
 
 ```bash
@@ -188,6 +223,10 @@ sudo systemctl enable --now asic-edr.service
 ```
 
 The unit keeps the runtime filesystem mostly read-only and only grants write access to `/var/log/asic-edr`. It still runs as root with a narrow capability set because loading eBPF programs and enriching process context from `/proc` require elevated privileges.
+
+Debian packaging metadata is staged under `packaging/debian/`. It is currently a
+skeleton for repeatable packaging validation; live package release automation and
+artifact checksums remain roadmap items.
 
 ## Rules
 

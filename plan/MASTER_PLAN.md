@@ -22,7 +22,7 @@ The daemon should detect high-signal endpoint behavior locally, emit durable JSO
 ## Roadmap Priorities
 
 1. Detection quality:
-   improve behavioral logic flows, reduce single-event noise, add user-presence context, and tune by endpoint profile.
+   improve behavioral logic flows, reduce single-event noise, add user-idle/user-presence context, and tune by endpoint profile.
 
 2. Replay and analytics:
    validate local JSONL spool files, normalize records for downstream tools, and keep QIHSE optional.
@@ -48,12 +48,13 @@ Completed:
 - Flow policy controls through `disable_rule_id=<rule_id>` and `rule_severity=<rule_id>,<severity>`.
 - `flow.sensitive_read_then_public_net`.
 - Profile-aware defaults for compiled behavioral flow severity and score.
+- Exact-match allowlist controls that reduce benign no-TTY public transfer flow noise without suppressing sensitive-read exfil or shell-downloader flows.
 
 Next:
 
-1. Add negative scoring or allowlist hooks for known benign transfer paths.
-2. Add user idle/user-presence enrichment from logind or input sources where available.
-3. Add credential-access flow expansion for archive, encode, copy, or exfil tool chains.
+1. Add user idle/user-presence enrichment from logind or input sources where available.
+2. Add credential-access flow expansion for archive, encode, copy, or exfil tool chains.
+3. Add additional profile-aware negative scoring beyond exact transfer allowlists.
 4. Add explicit flow parser syntax after compiled behavior stabilizes.
 
 ## Phase 2: Replay And Historical Analytics
@@ -74,14 +75,14 @@ Completed:
 
 Next implementation slice:
 
-1. Add QIHSE submission integration after dry-run batching, checkpoints, quarantine, and retry semantics are proven.
+1. Add forwarder health/status record emission before live submission.
 2. Keep forwarding optional and separate from the daemon hot path.
 3. Add profile-aware replay/analytics tuning views.
 
 Later:
 
 1. Add saved analytics packs for noisy-rule review by profile or host group.
-2. Add forwarder health record emission.
+2. Add QIHSE submission integration after dry-run batching, checkpoints, quarantine, retry, and health semantics are proven.
 
 ## Phase 3: Controlled Response
 
