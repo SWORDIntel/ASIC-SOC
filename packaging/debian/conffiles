@@ -1,0 +1,3 @@
+/etc/asic-edr/rules.conf
+/etc/logrotate.d/asic-edr
+/etc/systemd/system/asic-edr.service

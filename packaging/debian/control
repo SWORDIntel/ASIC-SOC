@@ -1,0 +1,16 @@
+Source: asic-soc
+Section: admin
+Priority: optional
+Maintainer: ASIC SOC Maintainers <maintainers@example.invalid>
+Build-Depends: debhelper (>= 13), clang, gcc, libbpf-dev, libelf-dev, make
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://example.invalid/asic-soc
+
+Package: asic-edr
+Architecture: linux-any
+Depends: ${shlibs:Depends}, ${misc:Depends}, logrotate
+Description: ASIC EDR telemetry agent
+ ASIC EDR collects endpoint telemetry and emits JSONL findings for local
+ monitoring. This package metadata is a release skeleton for Debian-style
+ packaging and should be reviewed before publication.

@@ -98,7 +98,7 @@ The QIHSE forwarder is dry-run only. It validates records, emits compact `qihse_
 
 ## Near-Term Work
 
-1. Add retry/backpressure specs for optional forwarding.
+1. Add QIHSE submission integration design after dry-run semantics are proven.
 2. Add additional profile-aware flow negative scoring.
-3. Add Debian packaging metadata.
-4. Add saved analytics query sketches for QIHSE import.
+3. Add release artifact checksums and install verification.
+4. Add forwarder health record emission.

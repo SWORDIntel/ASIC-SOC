@@ -1,0 +1,6 @@
+debian/tmp/usr/local/bin/asic-edr usr/local/bin/
+debian/tmp/usr/local/lib/asic-edr/asic_sensor.bpf.o usr/local/lib/asic-edr/
+debian/tmp/etc/asic-edr/rules.conf etc/asic-edr/
+debian/tmp/etc/logrotate.d/asic-edr etc/logrotate.d/
+debian/tmp/etc/systemd/system/asic-edr.service etc/systemd/system/
+debian/tmp/var/log/asic-edr var/log/

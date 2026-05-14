@@ -69,18 +69,19 @@ Completed:
 - Local JSONL replay validator for spool validation and normalized dry-run output.
 - Optional QIHSE dry-run forwarder with batching, validation, and checkpoint/resume support.
 - Quarantine reports for rejected or schema-incompatible forwarder inputs.
+- Retry/backpressure design for future live submission.
+- Saved analytics query sketches for QIHSE/imported JSONL review.
 
 Next implementation slice:
 
-1. Add retry/backpressure design for future live submission.
-2. Add saved analytics query sketches for flow detections, process-tree investigation, and cross-host command similarity.
-3. Keep forwarding optional and separate from the daemon hot path.
+1. Add QIHSE submission integration after dry-run batching, checkpoints, quarantine, and retry semantics are proven.
+2. Keep forwarding optional and separate from the daemon hot path.
+3. Add profile-aware replay/analytics tuning views.
 
 Later:
 
-1. Add profile-aware replay/analytics tuning views.
-2. Add QIHSE submission integration after dry-run batching and checkpoints are proven.
-3. Add saved analytics packs for noisy-rule review by profile or host group.
+1. Add saved analytics packs for noisy-rule review by profile or host group.
+2. Add forwarder health record emission.
 
 ## Phase 3: Controlled Response
 
@@ -97,7 +98,7 @@ Objective: record response intent safely before enabling any action.
 
 Objective: make deployment repeatable.
 
-1. Add Debian packaging for binary, BPF object, config, service, and logrotate files.
+1. Add Debian packaging for binary, BPF object, config, service, and logrotate files - skeleton complete.
 2. Add release artifact checksums and install verification.
 3. Add service health telemetry:
    events received, findings emitted, dedup suppressions, ring-buffer failures when exposed, and shutdown reason.

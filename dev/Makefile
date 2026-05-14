@@ -53,6 +53,9 @@ validate-logrotate:
 	trap 'rm -f "$$state"' EXIT; \
 	logrotate -d -s "$$state" ../packaging/logrotate/asic-edr
 
+validate-debian-packaging:
+	@cd .. && ./tests/ops_validation_test.sh --debian-packaging-only
+
 verify-install-local:
 	@cd .. && ./packaging/verify-install.sh --dry-run
 

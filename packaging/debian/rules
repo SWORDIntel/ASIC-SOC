@@ -1,0 +1,23 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE) -C dev
+
+override_dh_auto_clean:
+	$(MAKE) -C dev clean
+
+override_dh_auto_install:
+	install -d debian/tmp/usr/local/bin
+	install -d debian/tmp/usr/local/lib/asic-edr
+	install -d debian/tmp/etc/asic-edr
+	install -d debian/tmp/etc/logrotate.d
+	install -d debian/tmp/etc/systemd/system
+	install -d debian/tmp/var/log/asic-edr
+	install -m 0755 dev/asic_main debian/tmp/usr/local/bin/asic-edr
+	install -m 0644 dev/asic_sensor.bpf.o debian/tmp/usr/local/lib/asic-edr/asic_sensor.bpf.o
+	install -m 0644 config/rules.conf debian/tmp/etc/asic-edr/rules.conf
+	install -m 0644 packaging/logrotate/asic-edr debian/tmp/etc/logrotate.d/asic-edr
+	install -m 0644 asic-soc.service debian/tmp/etc/systemd/system/asic-edr.service
