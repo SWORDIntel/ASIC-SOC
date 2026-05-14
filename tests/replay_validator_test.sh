@@ -92,6 +92,57 @@ test_valid_fixture() {
         run_replay "$FIXTURE_DIR/valid_full.jsonl"
 }
 
+test_user_presence_fixtures_capture_active_vs_idle_transfer() {
+    run_replay "$FIXTURE_DIR/active_user_transfer.jsonl" "$FIXTURE_DIR/idle_user_transfer.jsonl"
+
+    python3 - "$FIXTURE_DIR/active_user_transfer.jsonl" "$FIXTURE_DIR/idle_user_transfer.jsonl" <<'PY'
+import json
+import sys
+
+active_path, idle_path = sys.argv[1], sys.argv[2]
+
+def findings(path):
+    records = []
+    with open(path, "r", encoding="utf-8") as lines:
+        for line in lines:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("record") == "finding":
+                records.append(record)
+    return records
+
+active = findings(active_path)
+idle = findings(idle_path)
+
+if not active or not idle:
+    print("active/idle user-presence fixtures need finding records", file=sys.stderr)
+    sys.exit(1)
+
+if any(record.get("flow_id") == "flow.idle_public_transfer_tool" for record in active):
+    print("active-user fixture unexpectedly contains idle public transfer flow", file=sys.stderr)
+    sys.exit(1)
+
+idle_flows = [
+    record
+    for record in idle
+    if record.get("flow_id") == "flow.idle_public_transfer_tool"
+]
+if not idle_flows:
+    print("idle-user fixture missing idle public transfer flow", file=sys.stderr)
+    sys.exit(1)
+
+flow = idle_flows[0]
+if flow.get("user_idle_seconds", 0) < 300:
+    print("idle-user fixture does not exceed idle threshold", file=sys.stderr)
+    sys.exit(1)
+if flow.get("has_tty") is not False or flow.get("interactive_session") is not False:
+    print("idle-user fixture is not non-interactive/no-TTY", file=sys.stderr)
+    sys.exit(1)
+PY
+    echo "PASS: user-presence fixtures distinguish active vs idle transfer"
+}
+
 test_normalize_outputs_compact_sorted_jsonl() {
     local normalized
     normalized="$(new_tmp)"
@@ -139,6 +190,7 @@ test_unknown_record_behavior() {
 cd "$ROOT_DIR"
 
 test_valid_fixture
+test_user_presence_fixtures_capture_active_vs_idle_transfer
 test_normalize_outputs_compact_sorted_jsonl
 test_invalid_fixtures_fail
 test_unknown_record_behavior

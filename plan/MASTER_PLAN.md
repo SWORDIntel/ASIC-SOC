@@ -49,10 +49,12 @@ Completed:
 - `flow.sensitive_read_then_public_net`.
 - Profile-aware defaults for compiled behavioral flow severity and score.
 - Exact-match allowlist controls that reduce benign no-TTY public transfer flow noise without suppressing sensitive-read exfil or shell-downloader flows.
+- User-presence enrichment with `user_idle_seconds`, `session_uid`, `session_id`, and `user_presence_source`.
+- `flow.idle_public_transfer_tool` for no-TTY, non-interactive public transfer activity during known local idle periods.
 
 Next:
 
-1. Add user idle/user-presence enrichment from logind or input sources where available.
+1. Add additional user-presence sources, especially logind seat/session state where available.
 2. Add credential-access flow expansion for archive, encode, copy, or exfil tool chains.
 3. Add additional profile-aware negative scoring beyond exact transfer allowlists.
 4. Add explicit flow parser syntax after compiled behavior stabilizes.

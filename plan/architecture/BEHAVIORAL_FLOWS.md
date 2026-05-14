@@ -7,7 +7,7 @@ Move ASIC-SOC from single-event matching toward EDR-style behavioral analytics t
 ## Implemented Foundation
 
 1. Process context:
-   pid, ppid, grandparent pid, parent command, grandparent command, executable path, cwd, command line, uid, gid, TTY marker, and interactive-session marker.
+   pid, ppid, grandparent pid, parent command, grandparent command, executable path, cwd, command line, uid, gid, TTY marker, interactive-session marker, session uid, session id, user-idle seconds, and user-presence source.
 
 2. Bounded flow state:
    short-lived per-process-tree state keyed by flow root pid and expired by a fixed time window.
@@ -36,6 +36,13 @@ Move ASIC-SOC from single-event matching toward EDR-style behavioral analytics t
    - transfer tool public destination connection within the flow window
    - critical severity
    - higher score when shell context or no-TTY context is also present
+
+4. `flow.idle_public_transfer_tool`
+   - transfer tool public destination connection
+   - no controlling TTY and non-interactive session
+   - known local user-presence source shows idle duration at or above `user_idle_threshold_seconds`
+   - warning in `baseline` and `developer-workstation`; critical in `server` and `high-signal`
+   - missing user-presence data is recorded as `unknown` and does not satisfy the idle condition
 
 ## Scoring Direction
 
@@ -67,7 +74,7 @@ Suggested severity mapping:
    reduce noise for known update tools, package managers, backup jobs, and approved transfer paths beyond exact allowlist matches.
 
 4. User-presence enrichment:
-   add optional idle/user-activity source from logind or input devices and treat missing data as unknown, not benign.
+   initial implementation complete with TTY/input-device idle sources, `user_idle_seconds`, `session_uid`, `session_id`, and `user_presence_source`.
 
 5. Credential exfil expansion:
    add `flow.credential_access_then_exfil_tool` for credential path access followed by archive, encode, copy, or transfer activity.

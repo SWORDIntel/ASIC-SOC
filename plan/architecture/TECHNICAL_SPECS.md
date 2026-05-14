@@ -44,7 +44,7 @@ Startup and finding records include:
 ## Finding Data Model
 
 - process identity: pid, tid, uid, gid, comm
-- process context: parent pid, parent command, grandparent pid, grandparent command, executable path, cwd, command line, TTY marker, and interactive-session marker
+- process context: parent pid, parent command, grandparent pid, grandparent command, executable path, cwd, command line, TTY marker, interactive-session marker, session uid, session id, user-idle seconds, and user-presence source
 - executable provenance: device, inode, mode, owner uid/gid, mtime, deleted executable marker, and writable-path classification
 - exec events: filename path
 - memory events: protection flags and mmap flags
@@ -74,6 +74,7 @@ Compiled behavioral flow detections use stable flow IDs:
 
 - `flow.shell_downloader_public_net`
 - `flow.no_tty_public_transfer_tool`
+- `flow.idle_public_transfer_tool`
 - `flow.sensitive_read_then_public_net`
 
 ## Policy Controls
@@ -81,6 +82,7 @@ Compiled behavioral flow detections use stable flow IDs:
 - `profile=<baseline|server|developer-workstation|high-signal>`
 - `min_severity=<info|warn|critical>`
 - `dedup_window_seconds=<seconds>`
+- `user_idle_threshold_seconds=<seconds>`
 - `key=value,severity` for value-backed rules
 - `disable_<rule_key>=value` for value-backed defaults
 - `disable_rule_id=<rule_id>` for stable IDs
@@ -98,7 +100,7 @@ The QIHSE forwarder is dry-run only. It validates records, emits compact `qihse_
 
 ## Near-Term Work
 
-1. Add QIHSE submission integration design after dry-run semantics are proven.
+1. Add additional user-presence sources, such as logind seat/session state where available.
 2. Add additional profile-aware flow negative scoring.
 3. Add release artifact checksums and install verification.
 4. Add forwarder health record emission.

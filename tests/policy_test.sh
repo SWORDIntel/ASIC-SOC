@@ -301,6 +301,10 @@ required_fields = (
     "grandparent_comm",
     "has_tty",
     "interactive_session",
+    "user_idle_seconds",
+    "session_uid",
+    "session_id",
+    "user_presence_source",
 )
 findings = []
 
@@ -329,19 +333,28 @@ for line_no, record in findings:
         )
         sys.exit(1)
 
-    if isinstance(record["gppid"], bool) or not isinstance(record["gppid"], int):
+    for field in ("gppid", "user_idle_seconds", "session_uid"):
+        if isinstance(record[field], bool) or not isinstance(record[field], int):
+            print(
+                f"finding JSONL record on line {line_no} has non-integer {field}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    if record["user_idle_seconds"] < 0:
         print(
-            f"finding JSONL record on line {line_no} has non-integer gppid",
+            f"finding JSONL record on line {line_no} has negative user_idle_seconds",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    if not isinstance(record["grandparent_comm"], str):
-        print(
-            f"finding JSONL record on line {line_no} has non-string grandparent_comm",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    for field in ("grandparent_comm", "session_id", "user_presence_source"):
+        if not isinstance(record[field], str):
+            print(
+                f"finding JSONL record on line {line_no} has non-string {field}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     for field in ("has_tty", "interactive_session"):
         if not isinstance(record[field], bool):
@@ -599,7 +612,7 @@ test_check_config_accepts_id_policy_controls() {
 test_check_config_accepts_flow_id_policy_controls() {
     local config_file
     config_file="$(base_config)"
-    printf '\ndisable_rule_id=flow.no_tty_public_transfer_tool\nrule_severity=flow.shell_downloader_public_net,critical\nrule_severity=flow.sensitive_read_then_public_net,critical\n' >> "$config_file"
+    printf '\ndisable_rule_id=flow.no_tty_public_transfer_tool\nrule_severity=flow.shell_downloader_public_net,critical\nrule_severity=flow.sensitive_read_then_public_net,critical\nrule_severity=flow.idle_public_transfer_tool,critical\n' >> "$config_file"
 
     cd "$DEV_DIR"
     if ! ./asic_main --check-config -c "$config_file" >/dev/null; then
@@ -646,6 +659,12 @@ test_check_config_rejects_invalid_policy() {
         echo "--check-config accepted invalid rule_severity severity" >&2
         exit 1
     fi
+
+    printf 'user_idle_threshold_seconds=soon\n' > "$config_file"
+    if ./asic_main --check-config -c "$config_file" >/dev/null 2>&1; then
+        echo "--check-config accepted invalid user_idle_threshold_seconds" >&2
+        exit 1
+    fi
 }
 
 test_check_config_rejects_invalid_profile() {
@@ -681,6 +700,28 @@ test_check_config_emits_policy_summary() {
     assert_present 'flow_allow_transfer=' "$summary_file" "--check-config summary missing flow_allow_transfer counter"
     assert_present 'min_severity=' "$summary_file" "--check-config summary missing min_severity"
     assert_present 'dedup_window_seconds=' "$summary_file" "--check-config summary missing dedup_window_seconds"
+    assert_present 'user_idle_threshold_seconds=' "$summary_file" "--check-config summary missing user_idle_threshold_seconds"
+}
+
+test_check_config_accepts_user_idle_threshold() {
+    local config_file summary_file actual_threshold
+    config_file="$(base_config)"
+    summary_file="$(new_tmp /tmp/asic-edr-policy-user-idle-summary.XXXXXX)"
+    printf '\nuser_idle_threshold_seconds=60\n' >> "$config_file"
+
+    cd "$DEV_DIR"
+    if ! ./asic_main --check-config -c "$config_file" > "$summary_file"; then
+        echo "--check-config rejected valid user_idle_threshold_seconds" >&2
+        cat "$summary_file" >&2 || true
+        exit 1
+    fi
+
+    actual_threshold="$(summary_value user_idle_threshold_seconds "$summary_file")"
+    if [[ "$actual_threshold" != "60" ]]; then
+        echo "unexpected user_idle_threshold_seconds summary value: $actual_threshold" >&2
+        cat "$summary_file" >&2 || true
+        exit 1
+    fi
 }
 
 test_check_config_flow_allow_transfer_count_add_remove() {
@@ -766,6 +807,7 @@ test_check_config_summary_emits_profile_flow_defaults() {
 
         assert_present 'flow_sensitive_read_then_public_net_severity=2' "$summary_file" "sensitive-read flow severity changed for profile: $profile"
         assert_present 'flow_shell_downloader_public_net_severity=2' "$summary_file" "shell-downloader flow severity changed for profile: $profile"
+        assert_present 'flow_idle_public_transfer_tool_score=' "$summary_file" "idle public transfer flow score missing for profile: $profile"
 
         actual_severity="$(summary_value flow_no_tty_public_transfer_tool_severity "$summary_file")"
         actual_score="$(summary_value flow_no_tty_public_transfer_tool_score "$summary_file")"
@@ -1005,6 +1047,7 @@ test_check_config_accepts_supported_profiles
 test_check_config_rejects_invalid_policy
 test_check_config_rejects_invalid_profile
 test_check_config_emits_policy_summary
+test_check_config_accepts_user_idle_threshold
 test_check_config_flow_allow_transfer_count_add_remove
 test_check_config_flow_allow_transfer_preserves_severity_override
 test_check_config_summary_emits_profile

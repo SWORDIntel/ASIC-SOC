@@ -32,6 +32,7 @@ health records, and reproducible release artifacts.
 - Userspace process enrichment from `/proc` for parent, executable, cwd, and command line
 - JSONL findings include `rule_id` plus executable provenance: device, inode, mode, owner ids, mtime, deleted executable marker, and writable-path classification
 - JSONL findings include first-stage behavioral-flow context: `gppid`, `grandparent_comm`, `has_tty`, and `interactive_session`
+- JSONL findings include local user-presence context: `user_idle_seconds`, `session_uid`, `session_id`, and `user_presence_source`
 - Behavioral flow findings add bounded process-tree correlation fields: `flow_id`, `flow_score`, `flow_reasons`, `flow_window_seconds`, and `flow_root_pid`
 - JSONL network findings include destination context fields for scope, privacy, and loopback classification
 - Deduplicated repeated findings include `repeat_count`
@@ -154,16 +155,20 @@ Findings also carry process lineage and session fields used by behavioral-flow d
 - `grandparent_comm`: grandparent command name when it can be resolved, otherwise an empty string
 - `has_tty`: boolean marker for whether the process appears to have a controlling terminal
 - `interactive_session`: boolean marker for whether the process appears tied to an interactive terminal session
+- `user_idle_seconds`: best-effort local idle duration, or `4294967295` when no local source is available
+- `session_uid`: login uid from `/proc/<pid>/loginuid` when available, otherwise the event uid
+- `session_id`: Linux session id from `/proc/<pid>/sessionid` when available
+- `user_presence_source`: source used for idle state, currently `tty`, `input`, or `unknown`
 
 Behavioral flow findings correlate short-lived process-tree activity and add:
 
-- `flow_id`: stable flow detection id, for example `flow.shell_downloader_public_net`, `flow.no_tty_public_transfer_tool`, or `flow.sensitive_read_then_public_net`
+- `flow_id`: stable flow detection id, for example `flow.shell_downloader_public_net`, `flow.no_tty_public_transfer_tool`, `flow.idle_public_transfer_tool`, or `flow.sensitive_read_then_public_net`
 - `flow_score`: additive suspicion score for the correlated behavior
 - `flow_reasons`: compact reason list explaining the score contributors
 - `flow_window_seconds`: time window used for the bounded process-tree correlation
 - `flow_root_pid`: process-tree root pid used as the flow correlation key
 
-Initial compiled flow detections cover shell-spawned downloader or transfer-tool activity that reaches a public network destination, no-TTY public transfer-tool activity, and sensitive file access followed by public-network transfer behavior.
+Initial compiled flow detections cover shell-spawned downloader or transfer-tool activity that reaches a public network destination, no-TTY public transfer-tool activity, idle-user non-interactive public transfer-tool activity, and sensitive file access followed by public-network transfer behavior.
 
 ## Replay Validator
 
@@ -235,7 +240,9 @@ Built-in defaults are compiled into the daemon and selected by policy profile. L
 Rule profiles select the built-in/default rule posture with `profile=<baseline|server|developer-workstation|high-signal>`. `baseline` preserves the default rule set, `server` trims workstation JIT allowances while keeping server-side process/network signal, `developer-workstation` keeps developer/browser/JVM JIT allowances, and `high-signal` suppresses noisy shell execution defaults while retaining higher-signal file, network, and executable-memory detections.
 Explicit config entries, `disable_<rule_key>`, `disable_rule_id`, and `rule_severity` apply on top of the selected profile.
 
-Compiled behavioral flows are profile-aware. `flow.sensitive_read_then_public_net` and `flow.shell_downloader_public_net` remain critical by default; `flow.no_tty_public_transfer_tool` is warning in `baseline`, critical in `server` and `high-signal`, and informational in `developer-workstation` unless promoted by `rule_severity`.
+Compiled behavioral flows are profile-aware. `flow.sensitive_read_then_public_net` and `flow.shell_downloader_public_net` remain critical by default. `flow.no_tty_public_transfer_tool` is warning in `baseline`, critical in `server` and `high-signal`, and informational in `developer-workstation` unless promoted by `rule_severity`. `flow.idle_public_transfer_tool` is warning in `baseline` and `developer-workstation`, and critical in `server` and `high-signal`.
+
+`user_idle_threshold_seconds=<seconds>` controls when known local user-presence data is treated as idle for `flow.idle_public_transfer_tool`; the default is `300`. Missing user-presence data is recorded as `unknown` and does not by itself satisfy the idle condition.
 
 Use `flow_allow_transfer=<comm-or-path>` to reduce benign no-TTY public transfer flow noise for exact command, target, or executable-path matches. Remove entries with `disable_flow_allow_transfer=<comm-or-path>`. This only lowers the generic `flow.no_tty_public_transfer_tool`; sensitive-read exfil and shell-downloader flows keep priority.
 
@@ -256,11 +263,13 @@ Stable finding `rule_id` values use the configured rule family for value-backed 
 - `mem.rwx_mmap`
 - `flow.shell_downloader_public_net`
 - `flow.no_tty_public_transfer_tool`
+- `flow.idle_public_transfer_tool`
 - `flow.sensitive_read_then_public_net`
 
 Supported keys:
 
 - `dedup_window_seconds`
+- `user_idle_threshold_seconds`
 - `min_severity`
 - `profile`
 - `suspicious_exec_exact`

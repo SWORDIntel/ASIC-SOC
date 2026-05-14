@@ -1,5 +1,6 @@
 #include <bpf/libbpf.h>
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -10,6 +11,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -26,10 +28,13 @@
 #define DEFAULT_DEDUP_WINDOW_SECONDS 5ULL
 #define FLOW_STATE_ENTRIES 256
 #define FLOW_WINDOW_SECONDS 120U
+#define DEFAULT_USER_IDLE_THRESHOLD_SECONDS 300U
+#define USER_IDLE_UNKNOWN_SECONDS UINT32_MAX
 #define JSONL_SCHEMA_VERSION "1"
 #define FLOW_RULE_SHELL_DOWNLOADER_PUBLIC_NET "flow.shell_downloader_public_net"
 #define FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL "flow.no_tty_public_transfer_tool"
 #define FLOW_RULE_SENSITIVE_READ_THEN_PUBLIC_NET "flow.sensitive_read_then_public_net"
+#define FLOW_RULE_IDLE_PUBLIC_TRANSFER_TOOL "flow.idle_public_transfer_tool"
 
 static volatile sig_atomic_t stop = 0;
 static struct bpf_link *links[5];
@@ -103,6 +108,7 @@ struct edr_rules {
     uint64_t dedup_window_ns;
     enum edr_severity min_severity;
     enum edr_severity anon_exec_mmap_severity;
+    uint32_t user_idle_threshold_seconds;
 };
 
 struct policy_summary {
@@ -122,6 +128,9 @@ struct policy_summary {
     uint32_t flow_shell_downloader_public_net_score;
     enum edr_severity flow_no_tty_public_transfer_tool_severity;
     uint32_t flow_no_tty_public_transfer_tool_score;
+    enum edr_severity flow_idle_public_transfer_tool_severity;
+    uint32_t flow_idle_public_transfer_tool_score;
+    uint32_t user_idle_threshold_seconds;
 };
 
 struct agent_metadata {
@@ -151,6 +160,10 @@ struct process_context {
     bool exe_writable_path;
     bool has_tty;
     bool interactive_session;
+    uint32_t user_idle_seconds;
+    uint32_t session_uid;
+    char session_id[64];
+    char user_presence_source[32];
 };
 
 struct dedup_entry {
@@ -434,6 +447,11 @@ static struct policy_summary current_policy_summary(void) {
             compiled_flow_rule_severity(FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL),
         .flow_no_tty_public_transfer_tool_score =
             default_flow_rule_score(FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL, false),
+        .flow_idle_public_transfer_tool_severity =
+            compiled_flow_rule_severity(FLOW_RULE_IDLE_PUBLIC_TRANSFER_TOOL),
+        .flow_idle_public_transfer_tool_score =
+            default_flow_rule_score(FLOW_RULE_IDLE_PUBLIC_TRANSFER_TOOL, false),
+        .user_idle_threshold_seconds = rules.user_idle_threshold_seconds,
     };
 }
 
@@ -546,7 +564,7 @@ static void write_policy_summary_console(FILE *out, const struct policy_summary 
     }
 
     fprintf(out,
-            "%sprofile=%s exec_exact=%zu exec_prefix=%zu sensitive_read=%zu sensitive_write=%zu jit_allow=%zu suspicious_ports=%zu flow_allow_transfer=%zu min_severity=%d dedup_window_seconds=%llu flow_sensitive_read_then_public_net_severity=%d flow_sensitive_read_then_public_net_score=%u flow_shell_downloader_public_net_severity=%d flow_shell_downloader_public_net_score=%u flow_no_tty_public_transfer_tool_severity=%d flow_no_tty_public_transfer_tool_score=%u\n",
+            "%sprofile=%s exec_exact=%zu exec_prefix=%zu sensitive_read=%zu sensitive_write=%zu jit_allow=%zu suspicious_ports=%zu flow_allow_transfer=%zu min_severity=%d dedup_window_seconds=%llu user_idle_threshold_seconds=%u flow_sensitive_read_then_public_net_severity=%d flow_sensitive_read_then_public_net_score=%u flow_shell_downloader_public_net_severity=%d flow_shell_downloader_public_net_score=%u flow_no_tty_public_transfer_tool_severity=%d flow_no_tty_public_transfer_tool_score=%u flow_idle_public_transfer_tool_severity=%d flow_idle_public_transfer_tool_score=%u\n",
             prefix ? prefix : "",
             summary->profile_name ? summary->profile_name : "baseline",
             summary->suspicious_exec_exact_count,
@@ -558,12 +576,15 @@ static void write_policy_summary_console(FILE *out, const struct policy_summary 
             summary->flow_allow_transfer_count,
             summary->min_severity,
             (unsigned long long)summary->dedup_window_seconds,
+            summary->user_idle_threshold_seconds,
             summary->flow_sensitive_read_then_public_net_severity,
             summary->flow_sensitive_read_then_public_net_score,
             summary->flow_shell_downloader_public_net_severity,
             summary->flow_shell_downloader_public_net_score,
             summary->flow_no_tty_public_transfer_tool_severity,
-            summary->flow_no_tty_public_transfer_tool_score);
+            summary->flow_no_tty_public_transfer_tool_score,
+            summary->flow_idle_public_transfer_tool_severity,
+            summary->flow_idle_public_transfer_tool_score);
 }
 
 static void write_policy_summary_jsonl(FILE *out, const struct policy_summary *summary) {
@@ -580,12 +601,15 @@ static void write_policy_summary_jsonl(FILE *out, const struct policy_summary *s
             "\"sensitive_read\":%zu,\"sensitive_write\":%zu,\"jit_allow\":%zu,"
             "\"suspicious_ports\":%zu,\"flow_allow_transfer\":%zu,"
             "\"min_severity\":%d,\"dedup_window_seconds\":%llu,"
+            "\"user_idle_threshold_seconds\":%u,"
             "\"flow_sensitive_read_then_public_net_severity\":%d,"
             "\"flow_sensitive_read_then_public_net_score\":%u,"
             "\"flow_shell_downloader_public_net_severity\":%d,"
             "\"flow_shell_downloader_public_net_score\":%u,"
             "\"flow_no_tty_public_transfer_tool_severity\":%d,"
-            "\"flow_no_tty_public_transfer_tool_score\":%u}\n",
+            "\"flow_no_tty_public_transfer_tool_score\":%u,"
+            "\"flow_idle_public_transfer_tool_severity\":%d,"
+            "\"flow_idle_public_transfer_tool_score\":%u}\n",
             summary->suspicious_exec_exact_count,
             summary->suspicious_exec_prefix_count,
             summary->sensitive_read_count,
@@ -595,12 +619,15 @@ static void write_policy_summary_jsonl(FILE *out, const struct policy_summary *s
             summary->flow_allow_transfer_count,
             summary->min_severity,
             (unsigned long long)summary->dedup_window_seconds,
+            summary->user_idle_threshold_seconds,
             summary->flow_sensitive_read_then_public_net_severity,
             summary->flow_sensitive_read_then_public_net_score,
             summary->flow_shell_downloader_public_net_severity,
             summary->flow_shell_downloader_public_net_score,
             summary->flow_no_tty_public_transfer_tool_severity,
-            summary->flow_no_tty_public_transfer_tool_score);
+            summary->flow_no_tty_public_transfer_tool_score,
+            summary->flow_idle_public_transfer_tool_severity,
+            summary->flow_idle_public_transfer_tool_score);
     fflush(out);
 }
 
@@ -689,6 +716,16 @@ static enum edr_severity default_flow_rule_severity(const char *rule_id) {
             return EDR_SEV_WARN;
         }
     }
+    if (strcmp(rule_id, FLOW_RULE_IDLE_PUBLIC_TRANSFER_TOOL) == 0) {
+        switch (rules.profile) {
+        case EDR_PROFILE_SERVER:
+        case EDR_PROFILE_HIGH_SIGNAL:
+            return EDR_SEV_CRITICAL;
+        case EDR_PROFILE_DEVELOPER_WORKSTATION:
+        case EDR_PROFILE_BASELINE:
+            return EDR_SEV_WARN;
+        }
+    }
     return EDR_SEV_WARN;
 }
 
@@ -712,6 +749,17 @@ static uint32_t default_flow_rule_score(const char *rule_id, bool suspicious_con
             return 40U;
         case EDR_PROFILE_BASELINE:
             return 70U;
+        }
+    }
+    if (strcmp(rule_id, FLOW_RULE_IDLE_PUBLIC_TRANSFER_TOOL) == 0) {
+        switch (rules.profile) {
+        case EDR_PROFILE_SERVER:
+        case EDR_PROFILE_HIGH_SIGNAL:
+            return 95U;
+        case EDR_PROFILE_DEVELOPER_WORKSTATION:
+            return 65U;
+        case EDR_PROFILE_BASELINE:
+            return 85U;
         }
     }
     return 0U;
@@ -805,6 +853,7 @@ static bool known_rule_id(const char *rule_id) {
         FLOW_RULE_SHELL_DOWNLOADER_PUBLIC_NET,
         FLOW_RULE_NO_TTY_PUBLIC_TRANSFER_TOOL,
         FLOW_RULE_SENSITIVE_READ_THEN_PUBLIC_NET,
+        FLOW_RULE_IDLE_PUBLIC_TRANSFER_TOOL,
     };
 
     for (size_t i = 0; i < sizeof(memory_rule_ids) / sizeof(memory_rule_ids[0]); i++) {
@@ -936,6 +985,7 @@ static void init_default_rules(void) {
     rules.dedup_window_ns = DEFAULT_DEDUP_WINDOW_SECONDS * NS_PER_SECOND;
     rules.min_severity = EDR_SEV_WARN;
     rules.anon_exec_mmap_severity = EDR_SEV_WARN;
+    rules.user_idle_threshold_seconds = DEFAULT_USER_IDLE_THRESHOLD_SECONDS;
 
     const char *exec_exact[] = {
         "bash", "sh", "dash", "zsh", "curl", "wget", "nc", "ncat", "socat", "pkexec", "sudo",
@@ -1214,6 +1264,14 @@ static bool load_rules_file(const char *path, bool required) {
                 continue;
             }
             rules.dedup_window_ns = seconds * NS_PER_SECOND;
+        } else if (strcmp(key, "user_idle_threshold_seconds") == 0) {
+            uint64_t seconds = 0;
+            if (!parse_u64(value, &seconds) || seconds > UINT32_MAX) {
+                fprintf(stderr, "invalid user_idle_threshold_seconds '%s' on line %u in %s\n", value, line_no, path);
+                valid = false;
+                continue;
+            }
+            rules.user_idle_threshold_seconds = (uint32_t)seconds;
         } else if (strcmp(key, "min_severity") == 0) {
             enum edr_severity severity = EDR_SEV_WARN;
             if (!parse_severity(value, &severity)) {
@@ -1360,6 +1418,131 @@ static bool read_proc_tty_nr(uint32_t pid, int *tty_nr) {
     return true;
 }
 
+static bool read_proc_session_id(uint32_t pid, char *dst, size_t dst_size) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%u/sessionid", pid);
+    return read_first_line_file(path, dst, dst_size);
+}
+
+static uint32_t read_proc_loginuid(uint32_t pid, uint32_t fallback_uid) {
+    char path[64];
+    char value[64];
+    snprintf(path, sizeof(path), "/proc/%u/loginuid", pid);
+    if (!read_first_line_file(path, value, sizeof(value))) {
+        return fallback_uid;
+    }
+
+    uint64_t parsed = 0;
+    if (!parse_u64(value, &parsed) || parsed > UINT32_MAX || parsed == UINT32_MAX) {
+        return fallback_uid;
+    }
+    return (uint32_t)parsed;
+}
+
+static uint32_t idle_seconds_from_stat(const struct stat *st, time_t now) {
+    time_t latest = st->st_mtime > st->st_atime ? st->st_mtime : st->st_atime;
+    if (latest <= 0 || now <= latest) {
+        return 0;
+    }
+
+    time_t delta = now - latest;
+    if ((uint64_t)delta > UINT32_MAX) {
+        return UINT32_MAX;
+    }
+    return (uint32_t)delta;
+}
+
+static bool tty_idle_seconds(uint32_t pid, uint32_t *idle_seconds) {
+    char path[64];
+    char target[EDR_MAX_TARGET];
+    struct stat st;
+    time_t now = time(NULL);
+
+    for (int fd = 0; fd <= 2; fd++) {
+        snprintf(path, sizeof(path), "/proc/%u/fd/%d", pid, fd);
+        ssize_t n = readlink(path, target, sizeof(target) - 1);
+        if (n < 0) {
+            continue;
+        }
+        target[n] = '\0';
+        if (!has_path_prefix(target, "/dev/tty") &&
+            !has_path_prefix(target, "/dev/pts/") &&
+            strcmp(target, "/dev/console") != 0) {
+            continue;
+        }
+        if (stat(target, &st) == 0) {
+            *idle_seconds = idle_seconds_from_stat(&st, now);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool input_idle_seconds(uint32_t *idle_seconds) {
+    DIR *dir = opendir("/dev/input");
+    if (!dir) {
+        return false;
+    }
+
+    bool seen = false;
+    time_t latest = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "event", 5) != 0) {
+            continue;
+        }
+
+        char path[512];
+        struct stat st;
+        snprintf(path, sizeof(path), "/dev/input/%s", entry->d_name);
+        if (stat(path, &st) != 0) {
+            continue;
+        }
+
+        time_t candidate = st.st_mtime > st.st_atime ? st.st_mtime : st.st_atime;
+        if (!seen || candidate > latest) {
+            latest = candidate;
+            seen = true;
+        }
+    }
+    closedir(dir);
+
+    if (!seen) {
+        return false;
+    }
+
+    time_t now = time(NULL);
+    if (now <= latest) {
+        *idle_seconds = 0;
+    } else if ((uint64_t)(now - latest) > UINT32_MAX) {
+        *idle_seconds = UINT32_MAX;
+    } else {
+        *idle_seconds = (uint32_t)(now - latest);
+    }
+    return true;
+}
+
+static void enrich_user_presence(uint32_t pid, uint32_t uid, struct process_context *proc) {
+    proc->session_uid = read_proc_loginuid(pid, uid);
+    if (!read_proc_session_id(pid, proc->session_id, sizeof(proc->session_id))) {
+        snprintf(proc->session_id, sizeof(proc->session_id), "unknown");
+    }
+
+    proc->user_idle_seconds = USER_IDLE_UNKNOWN_SECONDS;
+    snprintf(proc->user_presence_source, sizeof(proc->user_presence_source), "unknown");
+
+    uint32_t idle_seconds = 0;
+    if (tty_idle_seconds(pid, &idle_seconds)) {
+        proc->user_idle_seconds = idle_seconds;
+        snprintf(proc->user_presence_source, sizeof(proc->user_presence_source), "tty");
+        return;
+    }
+    if (input_idle_seconds(&idle_seconds)) {
+        proc->user_idle_seconds = idle_seconds;
+        snprintf(proc->user_presence_source, sizeof(proc->user_presence_source), "input");
+    }
+}
+
 static bool fd_link_is_tty(uint32_t pid, int fd) {
     char path[64];
     char target[EDR_MAX_TARGET];
@@ -1415,7 +1598,7 @@ static void read_proc_cmdline(uint32_t pid, char *dst, size_t dst_size) {
     dst[n] = '\0';
 }
 
-static void enrich_process(uint32_t pid, struct process_context *proc) {
+static void enrich_process(uint32_t pid, uint32_t uid, struct process_context *proc) {
     memset(proc, 0, sizeof(*proc));
     proc->ppid = read_proc_ppid(pid);
     proc->gppid = read_proc_ppid(proc->ppid);
@@ -1423,6 +1606,7 @@ static void enrich_process(uint32_t pid, struct process_context *proc) {
     read_proc_comm(proc->gppid, proc->grandparent_comm, sizeof(proc->grandparent_comm));
     proc->has_tty = process_has_tty(pid);
     proc->interactive_session = proc->has_tty;
+    enrich_user_presence(pid, uid, proc);
     read_proc_link(pid, "exe", proc->exe, sizeof(proc->exe));
     proc->exe_deleted = has_deleted_suffix(proc->exe);
     proc->exe_writable_path = is_writable_exe_path(proc->exe);
@@ -1819,6 +2003,9 @@ static bool evaluate_connect_flow(const struct edr_event *e,
     bool shell_context = process_tree_has_shell_context(e, proc) ||
                          (entry && entry->shell_seen);
     bool sensitive_read_context = entry && entry->sensitive_read_seen;
+    bool user_idle_context =
+        proc->user_idle_seconds != USER_IDLE_UNKNOWN_SECONDS &&
+        proc->user_idle_seconds >= rules.user_idle_threshold_seconds;
 
     if (sensitive_read_context) {
         bool suspicious_context = shell_context || !proc->has_tty;
@@ -1838,6 +2025,22 @@ static bool evaluate_connect_flow(const struct edr_event *e,
                 finding)) {
             return true;
         }
+    }
+
+    if (user_idle_context && !proc->has_tty && !proc->interactive_session) {
+        bool allowlisted = flow_transfer_allowlisted(e, proc);
+        return make_controlled_flow_finding(
+            allowlisted ? EDR_SEV_INFO :
+                default_flow_rule_severity(FLOW_RULE_IDLE_PUBLIC_TRANSFER_TOOL),
+            FLOW_RULE_IDLE_PUBLIC_TRANSFER_TOOL,
+            "idle user session with non-interactive public transfer tool",
+            allowlisted ? 30U :
+                default_flow_rule_score(FLOW_RULE_IDLE_PUBLIC_TRANSFER_TOOL, false),
+            allowlisted ?
+                "user_idle,no_tty,non_interactive,transfer_tool,public_destination,flow_allow_transfer" :
+                "user_idle,no_tty,non_interactive,transfer_tool,public_destination",
+            root_pid,
+            finding);
     }
 
     if (shell_context) {
@@ -2082,7 +2285,7 @@ static void write_jsonl(FILE *out, const struct edr_event *e,
             "\"exe_dev\":%llu,\"exe_inode\":%llu,\"exe_mode\":%u,\"exe_uid\":%u,\"exe_gid\":%u,"
             "\"exe_mtime\":%lld,\"exe_deleted\":%s,\"exe_writable_path\":%s,"
             "\"has_tty\":%s,\"interactive_session\":%s,"
-            "\"severity\":%d,\"repeat_count\":%u,\"rule_id\":\"",
+            "\"user_idle_seconds\":%u,\"session_uid\":%u,\"session_id\":\"",
             e->type == EDR_EVENT_CONNECT ? event_dst_port(e) : 0,
             e->prot, e->flags,
             proc->exe_dev, proc->exe_inode, proc->exe_mode, proc->exe_uid, proc->exe_gid,
@@ -2090,6 +2293,12 @@ static void write_jsonl(FILE *out, const struct edr_event *e,
             proc->exe_writable_path ? "true" : "false",
             proc->has_tty ? "true" : "false",
             proc->interactive_session ? "true" : "false",
+            proc->user_idle_seconds, proc->session_uid);
+    json_escape(out, proc->session_id);
+    fprintf(out, "\",\"user_presence_source\":\"");
+    json_escape(out, proc->user_presence_source);
+    fprintf(out,
+            "\",\"severity\":%d,\"repeat_count\":%u,\"rule_id\":\"",
             finding->severity, repeat_count);
     json_escape(out, finding->rule_id);
     fprintf(out, "\",\"reason\":\"");
@@ -2176,7 +2385,7 @@ static void emit_dedup_entry(struct edr_options *opts, struct dedup_entry *entry
         .flow_root_pid = entry->flow_root_pid,
     };
     struct process_context proc;
-    enrich_process(entry->event.pid, &proc);
+    enrich_process(entry->event.pid, entry->event.uid, &proc);
     emit_finding(opts, &entry->event, &proc, &finding, entry->repeat_count);
     clear_dedup_entry(entry);
 }
@@ -2242,7 +2451,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     memset(&proc, 0, sizeof(proc));
 
     if (e->type == EDR_EVENT_EXEC || e->type == EDR_EVENT_CONNECT) {
-        enrich_process(e->pid, &proc);
+        enrich_process(e->pid, e->uid, &proc);
         proc_enriched = true;
         flow_state_observe_event(e, &proc);
     }
@@ -2252,7 +2461,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         finding.rule_id &&
         rule_id_matches_family(finding.rule_id, "file.sensitive_read")) {
         if (!proc_enriched) {
-            enrich_process(e->pid, &proc);
+            enrich_process(e->pid, e->uid, &proc);
             proc_enriched = true;
         }
         flow_state_observe_sensitive_read(e, &proc);
@@ -2285,7 +2494,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     }
 
     if (!proc_enriched) {
-        enrich_process(e->pid, &proc);
+        enrich_process(e->pid, e->uid, &proc);
     }
     emit_finding(opts, e, &proc, &finding, 0);
     return 0;
